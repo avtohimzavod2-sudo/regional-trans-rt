@@ -2,10 +2,16 @@
 
 import { revalidatePath } from "next/cache";
 import { cookies } from "next/headers";
+import type { DriverCategory, LedgerEntryType, ParcelStatus } from "@prisma/client";
 import { db } from "@/lib/db";
 import { logAction } from "@/lib/audit";
 import { verifySessionToken, SESSION_COOKIE_NAME } from "@/lib/auth/session";
 import { completeTrip, proposeMatchesForRequest, handleDriverResponse, handlePassengerResponse } from "@/lib/matching/orchestrate";
+import { rootContext } from "@/lib/agents/trace";
+import { reviewScoutCandidate } from "@/lib/agents/scout";
+import { adjustBalance } from "@/lib/agents/pay";
+import { transitionParcel } from "@/lib/agents/parcel";
+import { resolveSupportCase } from "@/lib/agents/support";
 
 async function currentDispatcher() {
   const token = (await cookies()).get(SESSION_COOKIE_NAME)?.value;
@@ -110,4 +116,93 @@ export async function cancelMatchAction(matchId: string, reason: string) {
     details: { reason },
   });
   revalidatePath("/dispatcher");
+}
+
+// --- RT Scout: candidate review ---
+
+export async function scoutLinkAction(candidateId: string, formData: FormData) {
+  const dispatcher = await currentDispatcher();
+  const driverId = String(formData.get("driverId") ?? "").trim();
+  if (!driverId) throw new Error("driverId is required to link a scout candidate");
+  await reviewScoutCandidate(rootContext(), candidateId, { action: "LINK", driverId }, dispatcher.username);
+  revalidatePath("/dispatcher/scout");
+}
+
+export async function scoutRejectAction(candidateId: string) {
+  const dispatcher = await currentDispatcher();
+  await reviewScoutCandidate(rootContext(), candidateId, { action: "REJECT" }, dispatcher.username);
+  revalidatePath("/dispatcher/scout");
+}
+
+export async function scoutCreateNewAction(candidateId: string, formData: FormData) {
+  const dispatcher = await currentDispatcher();
+  const telegramUserId = String(formData.get("telegramUserId") ?? "").trim();
+  if (!telegramUserId) throw new Error("telegramUserId is required to create a new driver from a scout candidate");
+  await reviewScoutCandidate(rootContext(), candidateId, { action: "CREATE_NEW", telegramUserId }, dispatcher.username);
+  revalidatePath("/dispatcher/scout");
+}
+
+// --- Driver Intelligence: manual category override ---
+
+export async function overrideDriverCategoryAction(driverId: string, formData: FormData) {
+  const dispatcher = await currentDispatcher();
+  const category = String(formData.get("category") ?? "") as DriverCategory;
+  await db.driver.update({ where: { id: driverId }, data: { category } });
+  await logAction({
+    actorType: "DISPATCHER",
+    actorId: dispatcher.username,
+    action: "dispatcher.override_driver_category",
+    entityType: "Driver",
+    entityId: driverId,
+    details: { category },
+  });
+  revalidatePath("/dispatcher/drivers");
+}
+
+// --- RT Balance / ledger ---
+
+export async function ledgerAdjustAction(driverId: string, type: Extract<LedgerEntryType, "TOPUP" | "ADJUSTMENT">, formData: FormData) {
+  const dispatcher = await currentDispatcher();
+  const rawAmount = Number(formData.get("amountSom"));
+  if (!Number.isFinite(rawAmount) || rawAmount === 0) throw new Error("amountSom must be a non-zero number");
+  const amountSom = type === "TOPUP" ? Math.abs(rawAmount) : rawAmount;
+  const description = String(formData.get("description") ?? "") || undefined;
+  await adjustBalance(rootContext(), driverId, amountSom, type, "DISPATCHER", dispatcher.username, description);
+  revalidatePath("/dispatcher/ledger");
+}
+
+// --- Parcels ---
+
+export async function parcelTransitionAction(parcelId: string, formData: FormData) {
+  const dispatcher = await currentDispatcher();
+  const to = String(formData.get("status") ?? "") as ParcelStatus;
+  if (!to) throw new Error("target status is required");
+  await transitionParcel(rootContext(), parcelId, to);
+  await logAction({
+    actorType: "DISPATCHER",
+    actorId: dispatcher.username,
+    action: "dispatcher.parcel_status_override",
+    entityType: "Parcel",
+    entityId: parcelId,
+    details: { to },
+  });
+  revalidatePath("/dispatcher/parcels");
+}
+
+// --- Support cases ---
+
+export async function resolveSupportCaseAction(caseId: string, formData: FormData) {
+  const dispatcher = await currentDispatcher();
+  const resolution = String(formData.get("resolution") ?? "").trim();
+  if (!resolution) throw new Error("a resolution note is required");
+  await resolveSupportCase(rootContext(), caseId, resolution);
+  await logAction({
+    actorType: "DISPATCHER",
+    actorId: dispatcher.username,
+    action: "dispatcher.support_case_resolved",
+    entityType: "SupportCase",
+    entityId: caseId,
+    details: { resolution },
+  });
+  revalidatePath("/dispatcher/support");
 }

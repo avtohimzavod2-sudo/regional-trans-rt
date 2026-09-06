@@ -7,9 +7,30 @@ export default function DispatcherLayout({ children }: { children: React.ReactNo
       <header className="flex items-center justify-between border-b border-neutral-800 px-6 py-4">
         <div className="flex items-center gap-6">
           <span className="font-semibold">Regional Trans RT</span>
-          <nav className="flex gap-4 text-sm text-neutral-400">
+          <nav className="flex flex-wrap gap-4 text-sm text-neutral-400">
             <Link href="/dispatcher" className="hover:text-neutral-100">
               Панель
+            </Link>
+            <Link href="/dispatcher/scout" className="hover:text-neutral-100">
+              RT Scout
+            </Link>
+            <Link href="/dispatcher/drivers" className="hover:text-neutral-100">
+              Водители
+            </Link>
+            <Link href="/dispatcher/ledger" className="hover:text-neutral-100">
+              RT Баланс
+            </Link>
+            <Link href="/dispatcher/parcels" className="hover:text-neutral-100">
+              Посылки
+            </Link>
+            <Link href="/dispatcher/support" className="hover:text-neutral-100">
+              Обращения
+            </Link>
+            <Link href="/dispatcher/analytics" className="hover:text-neutral-100">
+              Аналитика
+            </Link>
+            <Link href="/dispatcher/agents" className="hover:text-neutral-100">
+              Агенты
             </Link>
             <Link href="/dispatcher/audit" className="hover:text-neutral-100">
               Журнал действий
