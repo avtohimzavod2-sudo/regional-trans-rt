@@ -42,6 +42,13 @@ src/app/dispatcher/          диспетчерская панель (ручно
 src/lib/mira/                МИРА (Контактер RT) — единая публичная персона поверх RT Command
 src/lib/mira/training/       MIRA KYRGYZ TRAINING: 30-уровневая программа, корпус, бенчмарк, KPI, сертификация
 src/app/dispatcher/(app)/mira/  Mira Center — панель обучения/бенчмарка/сертификации Миры
+src/lib/jolchu/               ЖОЛЧУ (Route Intelligence Agent) — отдельный агент геопонимания
+src/lib/jolchu/providers/     JolchuModelProvider — понимание текста (без географических фактов)
+src/lib/jolchu/route-providers/  RouteProvider — единственный источник координат/маршрута/трафика
+src/lib/jolchu/location/      резолвер локаций: ввод -> geocode -> confidence/ambiguity
+src/lib/jolchu/route/         расчёт маршрута, определение Last Mile
+src/lib/jolchu/training/      бенчмарк Жолчу: 30 обязательных сценариев + KPI
+src/app/dispatcher/(app)/jolchu/  Jolchu Center — 12 вкладок диагностики маршрутного агента
 ```
 
 ## МИРА — Контактер RT
@@ -86,6 +93,60 @@ src/app/dispatcher/(app)/mira/  Mira Center — панель обучения/б
 абстракция готова (`AudioUnderstandingProvider`), но скачивание голосовых вложений из вебхуков
 ещё не подключено, поэтому в проде голос сейчас не обрабатывается.
 
+## ЖОЛЧУ — Route Intelligence Agent
+
+Жолчу — отдельный внутренний агент RT AI Workforce, отвечающий только за геопонимание:
+превращает человеческое описание места («после моста, где раньше был рынок», ссылку Google/2GIS,
+голую точку GPS, «Аламедин» без уточнения) в проверенную структурированную географию. Жолчу — **не
+часть Миры** и **не вспомогательная функция**: у него собственная бизнес-логика, тесты,
+диагностическая панель и абстракция провайдера, как у любого другого специализированного агента.
+
+- **Принцип вызова**: Мира не дёргает Жолчу на каждое сообщение. Обычная беседа, приветствия,
+  вопросы о цене и FAQ никогда не активируют Жолчу. Вызов происходит только когда RT COMMAND
+  определяет одну из причин: `LOCATION_RESOLUTION`, `ROUTE_CALCULATION`, `TRAFFIC_CHECK`,
+  `LAST_MILE`, `AMBIGUITY_CHECK` (`src/lib/jolchu/routing-decision.ts`). Маршрут решения:
+  **МИРА → NEED_ROUTE_INTELLIGENCE → ЖОЛЧУ**.
+- **«Карты — это не LLM»** (структурное, а не декларативное правило): `JolchuModelProvider`
+  умеет только понимать текст — очищать запрос для геокодера, распознавать ориентир/населённый
+  пункт без улицы, помечать возможную неоднозначность (`understand()` никогда не возвращает
+  координаты, километры, время в пути или трафик). Единственный источник географической правды —
+  `RouteProvider` (`GoogleMapsRouteProvider`, `TwoGisRouteProvider`, `MockRouteProvider`,
+  `src/lib/jolchu/route-providers/`).
+- **Провайдер ИИ и провайдер карт независимы друг от друга и заменяемы**: `JolchuModelProvider`/
+  `JolchuModelRouter` (`PRIMARY_MODEL`/`FALLBACK_MODEL`/`MOCK_MODEL`) и `RouteProvider` с fallback-
+  цепочкой Google Maps → 2GIS → `ROUTE_PROVIDER_UNAVAILABLE`, если недоступны оба.
+- **Никогда не угадывает точку**: при неоднозначности (несколько кандидатов, разметка
+  `possiblyAmbiguous`, низкая уверенность) `ResolvedLocation` возвращает `latitude/longitude: null`,
+  `ambiguity: true` и список `ambiguityCandidates` — вместо того чтобы выбрать случайный вариант
+  (`src/lib/jolchu/location/resolver.ts`).
+- **Реальный дорожный маршрут, а не прямая линия**: `straightLineDistanceKm` и `roadDistanceKm`
+  хранятся раздельно; дальше по конвейеру передаётся только `roadDistanceKm`
+  (`src/lib/jolchu/route/calculate.ts`).
+- **Трафик** — только фактический статус (`trafficStatus`) и, если провайдер поддерживает,
+  ETA с учётом трафика; Жолчу никогда не назначает наценку — это вне его зоны ответственности.
+- **Last Mile** отделён от основного межгородского маршрута (`MAIN_INTERCITY_ROUTE`) настраиваемым
+  порогом (`JOLCHU_LAST_MILE_THRESHOLD_KM`), а не захардкоженной коммерческой логикой
+  (`src/lib/jolchu/route/last-mile.ts`).
+- **Полное отделение от денег**: Жолчу не считает стоимость поездки, не знает про тариф, комиссию
+  или цену за километр и не принимает финансовых решений. Конвейер:
+  **КЛИЕНТ → МИРА → ЖОЛЧУ → ROUTE INTELLIGENCE RESULT → будущий тарифный агент → МИРА → КЛИЕНТ**.
+  `RouteIntelligenceResult` (`src/lib/jolchu/types.ts`) структурно никогда не содержит цену/тариф.
+- **Рассчитан на будущее использование** не только в такси: пассажирская маршрутизация, обратный
+  рейс водителя, посылки, курьерская «последняя миля», RT Point, логистические цепочки, грузовые и
+  мультимодальные перевозки — поэтому сущности называются нейтрально (`RouteIntelligenceResult`, а
+  не `TaxiRoute`).
+- **Обязательное ежемесячное обновление справочных данных** — `JolchuDataRefreshService`
+  (`src/lib/jolchu/data-refresh.ts`), без скрытого самообучения; статус и история видны во вкладке
+  «Data Freshness» Jolchu Center.
+- **Mock-режим**: полностью тестируем без реальных ключей, детерминирован, никогда не подделывает
+  живой трафик (всегда `UNKNOWN`) и явно помечен «MOCK» в UI.
+- **Jolchu Center** (`/dispatcher/jolchu`) — 12 вкладок: Overview, Requests, Locations, Routes,
+  Providers, Traffic, Last Mile, Ambiguities, Errors, Benchmarks, Data Freshness, Settings.
+  Overview показывает реальные метрики или честный zero-state, никогда не подделывает данные.
+- **Аудит**: каждый запрос диагностируем от входного текста до итогового результата; API-ключи и
+  секреты никогда не логируются; точные координаты трактуются как чувствительные операционные
+  данные.
+
 ## Запуск локально
 
 1. Скопируйте `.env.example` в `.env.local` и заполните значения (см. ниже, откуда их взять).
@@ -114,6 +175,12 @@ src/app/dispatcher/(app)/mira/  Mira Center — панель обучения/б
 | `MIRA_AI_PROVIDER` | `mock` (по умолчанию, без ключей) или `google`. Мока достаточно для разработки, тестов и демонстрации Mira Center. |
 | `MIRA_GEMINI_API_KEY`, `MIRA_GEMINI_MODEL` | Нужны только при `MIRA_AI_PROVIDER=google`. Ключ — [Google AI Studio](https://aistudio.google.com/). Без ключа приложение не падает — Мира работает на моке, а «Провайдер» в Mira Center покажет «не готов». |
 | `MIRA_AUDIO_PROVIDER` | `mock` (по умолчанию) или `google`. Реальный приём голосовых сообщений из Telegram/WhatsApp пока не подключён к вебхукам — это архитектурная заглушка. |
+| `JOLCHU_MODEL_PROVIDER`, `JOLCHU_PRIMARY_MODEL`, `JOLCHU_FALLBACK_MODEL` | `mock` (по умолчанию, без ключей). Отвечает только за понимание текста — не за координаты. Реальная модель подключается так же, как у Миры. |
+| `JOLCHU_ROUTE_PROVIDER`, `JOLCHU_ROUTE_FALLBACK_PROVIDER` | `mock` (по умолчанию). Единственный источник реальной географии — задайте `google`/`2gis`, только когда ниже указан соответствующий ключ. |
+| `GOOGLE_MAPS_API_KEY` | [Google Cloud Console](https://console.cloud.google.com/) → включить Geocoding API + Directions/Routes API. Нужен только при `JOLCHU_ROUTE_PROVIDER=google` или как fallback. |
+| `TWO_GIS_API_KEY` | [dev.2gis.com](https://dev.2gis.com/) — Geocoder API + Routing API. Нужен только при использовании 2GIS как основного или резервного провайдера. |
+| `JOLCHU_CONFIRMATION_CONFIDENCE_THRESHOLD`, `JOLCHU_LAST_MILE_THRESHOLD_KM` | Пороговые значения политики Жолчу (уверенность геокодирования, порог «последней мили»); значения по умолчанию подходят для пилота, менять не обязательно. |
+| `JOLCHU_DATA_REFRESH_INTERVAL_DAYS` | `30` по умолчанию — периодичность обязательного обновления справочных данных Жолчу (не влияет на живой трафик, который всегда запрашивается в реальном времени). |
 
 Ни один из этих сервисов не подключается автоматически — агент не может получить доступ к
 WhatsApp Business, Telegram-группам или базе данных без того, чтобы вы явно выдали
