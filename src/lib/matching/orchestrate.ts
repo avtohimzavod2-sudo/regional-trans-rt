@@ -1,0 +1,322 @@
+import { db } from "@/lib/db";
+import { logAction } from "@/lib/audit";
+import { findCandidateOffers, findCandidateRequests } from "./engine";
+import { buildReturnLegOfferInput } from "./queue";
+import { confirmDeclineKeyboard, sendTelegramMessage } from "@/lib/messaging/telegram";
+import { sendWhatsAppConfirmButtons, sendWhatsAppText } from "@/lib/messaging/whatsapp";
+import { messages, type Lang } from "@/lib/i18n/messages";
+import type { MatchableOffer, MatchableRequest } from "./types";
+
+const ACTIVE_MATCH_STATUSES = ["PROPOSED_TO_DRIVER", "AWAITING_DRIVER", "AWAITING_PASSENGER"] as const;
+
+function toMatchableRequest(r: {
+  id: string;
+  origin: { id: string; corridorId: string; order: number };
+  destination: { id: string; corridorId: string; order: number };
+  travelDate: Date;
+  timeWindowStart: string | null;
+  timeWindowEnd: string | null;
+  seats: number;
+}): MatchableRequest {
+  return r;
+}
+
+function toMatchableOffer(o: {
+  id: string;
+  driverId: string;
+  driver: { status: string };
+  origin: { id: string; corridorId: string; order: number };
+  destination: { id: string; corridorId: string; order: number };
+  travelDate: Date;
+  timeWindowStart: string | null;
+  timeWindowEnd: string | null;
+  seatsAvailable: number;
+  status: string;
+  createdAt: Date;
+}): MatchableOffer {
+  return {
+    id: o.id,
+    driverId: o.driverId,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    driverStatus: o.driver.status as any,
+    origin: o.origin,
+    destination: o.destination,
+    travelDate: o.travelDate,
+    timeWindowStart: o.timeWindowStart,
+    timeWindowEnd: o.timeWindowEnd,
+    seatsAvailable: o.seatsAvailable,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    status: o.status as any,
+    createdAt: o.createdAt,
+  };
+}
+
+async function excludedOfferIdsForRequest(requestId: string): Promise<string[]> {
+  const declined = await db.match.findMany({
+    where: { tripRequestId: requestId, status: { in: ["DECLINED_BY_DRIVER", "DECLINED_BY_PASSENGER", "EXPIRED", "CANCELLED"] } },
+    select: { driverOfferId: true },
+  });
+  return declined.map((m) => m.driverOfferId);
+}
+
+async function excludedRequestIdsForOffer(offerId: string): Promise<string[]> {
+  const declined = await db.match.findMany({
+    where: { driverOfferId: offerId, status: { in: ["DECLINED_BY_DRIVER", "DECLINED_BY_PASSENGER", "EXPIRED", "CANCELLED"] } },
+    select: { tripRequestId: true },
+  });
+  return declined.map((m) => m.tripRequestId);
+}
+
+async function hasActiveMatch(where: { tripRequestId?: string; driverOfferId?: string }): Promise<boolean> {
+  const count = await db.match.count({ where: { ...where, status: { in: [...ACTIVE_MATCH_STATUSES] } } });
+  return count > 0;
+}
+
+async function proposeToDriver(requestId: string, offerId: string) {
+  const match = await db.match.create({
+    data: {
+      tripRequestId: requestId,
+      driverOfferId: offerId,
+      status: "AWAITING_DRIVER",
+      proposedToDriverAt: new Date(),
+    },
+  });
+
+  const [request, offer] = await Promise.all([
+    db.tripRequest.findUniqueOrThrow({
+      where: { id: requestId },
+      include: { origin: true, destination: true, passenger: true },
+    }),
+    db.driverOffer.findUniqueOrThrow({ where: { id: offerId }, include: { driver: true } }),
+  ]);
+
+  await db.tripRequest.update({ where: { id: requestId }, data: { status: "MATCHING" } });
+
+  const lang = (offer.driver.preferredLang ?? "RU") as Lang;
+  const text = messages.proposalToDriver[lang](
+    { ru: request.origin.nameRu, ky: request.origin.nameKy, en: request.origin.nameEn },
+    { ru: request.destination.nameRu, ky: request.destination.nameKy, en: request.destination.nameEn },
+    lang,
+    request.travelDate.toISOString().slice(0, 10),
+    request.seats,
+  );
+  await sendTelegramMessage(offer.driver.telegramUserId, text, confirmDeclineKeyboard(match.id, "driver"));
+
+  await logAction({
+    actorType: "AGENT",
+    action: "match.proposed_to_driver",
+    entityType: "Match",
+    entityId: match.id,
+    details: { requestId, offerId },
+  });
+
+  return match;
+}
+
+export async function proposeMatchesForRequest(requestId: string) {
+  if (await hasActiveMatch({ tripRequestId: requestId })) return null;
+
+  const request = await db.tripRequest.findUniqueOrThrow({
+    where: { id: requestId },
+    include: { origin: true, destination: true },
+  });
+  if (request.status !== "PENDING" && request.status !== "MATCHING") return null;
+
+  const excluded = await excludedOfferIdsForRequest(requestId);
+  const offers = await db.driverOffer.findMany({
+    where: {
+      status: { in: ["OPEN", "PARTIALLY_FILLED"] },
+      travelDate: request.travelDate,
+      id: { notIn: excluded },
+    },
+    include: { origin: true, destination: true, driver: true },
+  });
+
+  const candidates = findCandidateOffers(toMatchableRequest(request), offers.map(toMatchableOffer));
+  if (candidates.length === 0) return null;
+
+  return proposeToDriver(requestId, candidates[0].offer.id);
+}
+
+export async function proposeMatchesForOffer(offerId: string) {
+  if (await hasActiveMatch({ driverOfferId: offerId })) return null;
+
+  const offer = await db.driverOffer.findUniqueOrThrow({
+    where: { id: offerId },
+    include: { origin: true, destination: true, driver: true },
+  });
+  if (offer.status !== "OPEN" && offer.status !== "PARTIALLY_FILLED") return null;
+  if (offer.driver.status !== "ACTIVE") return null;
+
+  const excluded = await excludedRequestIdsForOffer(offerId);
+  const requests = await db.tripRequest.findMany({
+    where: {
+      status: { in: ["PENDING", "MATCHING"] },
+      travelDate: offer.travelDate,
+      id: { notIn: excluded },
+    },
+    include: { origin: true, destination: true },
+  });
+
+  const candidates = findCandidateRequests(toMatchableOffer(offer), requests.map(toMatchableRequest));
+  if (candidates.length === 0) return null;
+
+  return proposeToDriver(candidates[0].request.id, offerId);
+}
+
+export async function handleDriverResponse(matchId: string, accepted: boolean) {
+  const match = await db.match.findUniqueOrThrow({
+    where: { id: matchId },
+    include: {
+      tripRequest: { include: { origin: true, destination: true, passenger: true } },
+      driverOffer: { include: { driver: true } },
+    },
+  });
+  if (match.status !== "AWAITING_DRIVER") return match;
+
+  if (!accepted) {
+    const updated = await db.match.update({
+      where: { id: matchId },
+      data: { status: "DECLINED_BY_DRIVER", driverRespondedAt: new Date() },
+    });
+    await logAction({ actorType: "AGENT", action: "match.declined_by_driver", entityType: "Match", entityId: matchId });
+    await proposeMatchesForRequest(match.tripRequestId);
+    return updated;
+  }
+
+  const updated = await db.match.update({
+    where: { id: matchId },
+    data: { status: "AWAITING_PASSENGER", driverRespondedAt: new Date(), proposedToPassengerAt: new Date() },
+  });
+
+  const lang = (match.tripRequest.passenger.preferredLang ?? "RU") as Lang;
+  const text = messages.proposalToPassenger[lang](
+    { ru: match.tripRequest.origin.nameRu, ky: match.tripRequest.origin.nameKy, en: match.tripRequest.origin.nameEn },
+    { ru: match.tripRequest.destination.nameRu, ky: match.tripRequest.destination.nameKy, en: match.tripRequest.destination.nameEn },
+    lang,
+    match.tripRequest.travelDate.toISOString().slice(0, 10),
+  );
+  await sendWhatsAppConfirmButtons(match.tripRequest.passenger.whatsappId, text, matchId);
+
+  await logAction({ actorType: "AGENT", action: "match.confirmed_by_driver", entityType: "Match", entityId: matchId });
+  return updated;
+}
+
+export async function handlePassengerResponse(matchId: string, accepted: boolean) {
+  const match = await db.match.findUniqueOrThrow({
+    where: { id: matchId },
+    include: {
+      tripRequest: { include: { passenger: true } },
+      driverOffer: { include: { driver: true } },
+    },
+  });
+  if (match.status !== "AWAITING_PASSENGER") return match;
+
+  if (!accepted) {
+    const updated = await db.match.update({
+      where: { id: matchId },
+      data: { status: "DECLINED_BY_PASSENGER", passengerRespondedAt: new Date() },
+    });
+    await db.tripRequest.update({ where: { id: match.tripRequestId }, data: { status: "PENDING" } });
+    await logAction({ actorType: "AGENT", action: "match.declined_by_passenger", entityType: "Match", entityId: matchId });
+    const driverLang = (match.driverOffer.driver.preferredLang ?? "RU") as Lang;
+    await sendTelegramMessage(match.driverOffer.driver.telegramUserId, messages.declinedTryNext[driverLang]);
+    await proposeMatchesForRequest(match.tripRequestId);
+    return updated;
+  }
+
+  const now = new Date();
+  const [updatedMatch] = await db.$transaction([
+    db.match.update({ where: { id: matchId }, data: { status: "CONFIRMED", passengerRespondedAt: now, confirmedAt: now } }),
+    db.tripRequest.update({ where: { id: match.tripRequestId }, data: { status: "CONFIRMED" } }),
+  ]);
+
+  const offer = await db.driverOffer.findUniqueOrThrow({ where: { id: match.driverOfferId } });
+  const request = await db.tripRequest.findUniqueOrThrow({ where: { id: match.tripRequestId }, include: { passenger: true } });
+  const newSeatsAvailable = Math.max(0, offer.seatsAvailable - request.seats);
+  await db.driverOffer.update({
+    where: { id: offer.id },
+    data: { seatsAvailable: newSeatsAvailable, status: newSeatsAvailable === 0 ? "FULL" : "PARTIALLY_FILLED" },
+  });
+
+  const trip = await db.trip.create({
+    data: {
+      matchId,
+      driverId: match.driverOffer.driverId,
+      passengerId: request.passengerId,
+      driverOfferId: match.driverOfferId,
+      status: "SCHEDULED",
+    },
+  });
+
+  await revealContacts(matchId, trip.id);
+  await logAction({ actorType: "AGENT", action: "match.confirmed", entityType: "Match", entityId: matchId, details: { tripId: trip.id } });
+  return updatedMatch;
+}
+
+async function revealContacts(matchId: string, tripId: string) {
+  const match = await db.match.findUniqueOrThrow({
+    where: { id: matchId },
+    include: {
+      tripRequest: { include: { passenger: true } },
+      driverOffer: { include: { driver: true } },
+    },
+  });
+
+  const driver = match.driverOffer.driver;
+  const passenger = match.tripRequest.passenger;
+
+  const driverLang = (driver.preferredLang ?? "RU") as Lang;
+  const passengerLang = (passenger.preferredLang ?? "RU") as Lang;
+
+  await sendTelegramMessage(
+    driver.telegramUserId,
+    messages.contactRevealedToDriver[driverLang](
+      passenger.name ?? "-",
+      passenger.phone ?? passenger.whatsappId,
+      match.tripRequest.pickupPoint,
+    ),
+  );
+  await sendWhatsAppText(
+    passenger.whatsappId,
+    messages.contactRevealedToPassenger[passengerLang](
+      driver.name ?? "-",
+      driver.phone ?? driver.telegramUserId,
+      [driver.carModel, driver.carPlate].filter(Boolean).join(" "),
+    ),
+  );
+
+  await db.match.update({ where: { id: matchId }, data: { contactRevealedAt: new Date() } });
+  await logAction({ actorType: "AGENT", action: "contact.revealed", entityType: "Trip", entityId: tripId, details: { matchId } });
+}
+
+export async function completeTrip(tripId: string) {
+  const trip = await db.trip.findUniqueOrThrow({
+    where: { id: tripId },
+    include: { driverOffer: { include: { origin: true, destination: true } } },
+  });
+
+  await db.trip.update({ where: { id: tripId }, data: { status: "COMPLETED", completedAt: new Date() } });
+
+  const returnOffer = await db.driverOffer.create({
+    data: buildReturnLegOfferInput({
+      driverId: trip.driverId,
+      originStopId: trip.driverOffer.destinationStopId,
+      destinationStopId: trip.driverOffer.originStopId,
+      travelDate: trip.driverOffer.travelDate,
+      seatsTotal: trip.driverOffer.seatsTotal,
+      generatedFromTripId: trip.id,
+    }),
+  });
+
+  await logAction({
+    actorType: "SYSTEM",
+    action: "trip.completed",
+    entityType: "Trip",
+    entityId: tripId,
+    details: { returnLegOfferId: returnOffer.id },
+  });
+
+  await proposeMatchesForOffer(returnOffer.id);
+  return returnOffer;
+}

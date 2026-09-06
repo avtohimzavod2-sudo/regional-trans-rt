@@ -1,0 +1,298 @@
+// Regional Trans RT — dispatching engine data model.
+// Regional Trans is an information intermediary, not a carrier: the carriage
+// contract is formed directly between passenger and driver once a match is confirmed.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Language {
+  RU
+  KY
+  EN
+}
+
+enum Channel {
+  WHATSAPP
+  TELEGRAM_BOT
+  TELEGRAM_GROUP
+}
+
+enum DriverStatus {
+  PENDING_VERIFICATION
+  ACTIVE
+  SUSPENDED
+  BLOCKED
+}
+
+enum RequestStatus {
+  PENDING
+  MATCHING
+  MATCHED
+  CONFIRMED
+  CANCELLED
+  EXPIRED
+  COMPLETED
+}
+
+enum OfferStatus {
+  OPEN
+  PARTIALLY_FILLED
+  FULL
+  CLOSED
+  CANCELLED
+}
+
+enum MatchStatus {
+  PROPOSED_TO_DRIVER
+  AWAITING_DRIVER
+  AWAITING_PASSENGER
+  CONFIRMED
+  DECLINED_BY_DRIVER
+  DECLINED_BY_PASSENGER
+  EXPIRED
+  CANCELLED
+}
+
+enum TripStatus {
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum MessageParseResult {
+  PASSENGER_REQUEST
+  DRIVER_OFFER
+  CONFIRMATION_REPLY
+  UNRECOGNIZED
+  COMMAND
+  IGNORED_NOT_ALLOWED
+}
+
+enum ActorType {
+  AGENT
+  DISPATCHER
+  SYSTEM
+}
+
+// Ordered corridor of stops, e.g. Bishkek -> Balykchy -> Cholpon-Ata -> Bosteri -> Karakol.
+// Direction of travel is inferred by comparing `order` of origin vs destination stop.
+model Corridor {
+  id        String   @id @default(cuid())
+  key       String   @unique // e.g. "bishkek-karakol"
+  nameRu    String
+  nameKy    String
+  nameEn    String
+  isActive  Boolean  @default(true)
+  stops     Stop[]
+  createdAt DateTime @default(now())
+}
+
+model Stop {
+  id         String   @id @default(cuid())
+  corridorId String
+  corridor   Corridor @relation(fields: [corridorId], references: [id])
+  key        String // e.g. "bishkek", "balykchy", "cholpon-ata", "bosteri", "karakol"
+  nameRu     String
+  nameKy     String
+  nameEn     String
+  order      Int // position along the corridor, ascending
+  aliases    String[] // free-text aliases/spellings used by NLP matching
+
+  requestsAsOrigin      TripRequest[] @relation("RequestOrigin")
+  requestsAsDestination TripRequest[] @relation("RequestDestination")
+  offersAsOrigin        DriverOffer[] @relation("OfferOrigin")
+  offersAsDestination   DriverOffer[] @relation("OfferDestination")
+
+  @@unique([corridorId, key])
+  @@index([corridorId, order])
+}
+
+model Passenger {
+  id             String    @id @default(cuid())
+  whatsappId     String    @unique // WhatsApp wa_id (phone-linked)
+  phone          String? // E.164, may equal whatsappId; kept private, only shared on confirmed match
+  name           String?
+  preferredLang  Language  @default(RU)
+  isBlocked      Boolean   @default(false)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  requests       TripRequest[]
+  trips          Trip[]
+}
+
+model Driver {
+  id                String       @id @default(cuid())
+  telegramUserId    String       @unique
+  telegramUsername  String?
+  phone             String? // private, shared with passenger only on confirmed match
+  name              String?
+  carModel          String?
+  carPlate          String?
+  preferredLang     Language     @default(RU)
+  status            DriverStatus @default(PENDING_VERIFICATION)
+  verifiedAt        DateTime?
+  verifiedByAdminId String?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  offers            DriverOffer[]
+  trips             Trip[]
+}
+
+model TripRequest {
+  id             String        @id @default(cuid())
+  passengerId    String
+  passenger      Passenger     @relation(fields: [passengerId], references: [id])
+  originStopId   String
+  origin         Stop          @relation("RequestOrigin", fields: [originStopId], references: [id])
+  destinationStopId String
+  destination    Stop          @relation("RequestDestination", fields: [destinationStopId], references: [id])
+  travelDate     DateTime      @db.Date
+  timeWindowStart String? // "HH:mm", free-form time-of-day preference
+  timeWindowEnd   String?
+  seats          Int           @default(1)
+  luggage        String? // free-text luggage description
+  pickupPoint    String? // free-text pickup detail within origin stop
+  status         RequestStatus @default(PENDING)
+  sourceChannel  Channel       @default(WHATSAPP)
+  rawMessageId   String?
+  rawMessage     RawMessage?   @relation(fields: [rawMessageId], references: [id])
+  expiresAt      DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  matches        Match[]
+
+  @@index([status, travelDate])
+  @@index([originStopId, destinationStopId, travelDate])
+}
+
+model DriverOffer {
+  id                String      @id @default(cuid())
+  driverId          String
+  driver            Driver      @relation(fields: [driverId], references: [id])
+  originStopId      String
+  origin            Stop        @relation("OfferOrigin", fields: [originStopId], references: [id])
+  destinationStopId String
+  destination       Stop        @relation("OfferDestination", fields: [destinationStopId], references: [id])
+  travelDate        DateTime    @db.Date
+  timeWindowStart   String?
+  timeWindowEnd     String?
+  seatsTotal        Int
+  seatsAvailable    Int
+  status            OfferStatus @default(OPEN)
+  sourceChannel     Channel     @default(TELEGRAM_BOT)
+  rawMessageId      String?
+  rawMessage        RawMessage? @relation(fields: [rawMessageId], references: [id])
+  isReturnLeg       Boolean     @default(false)
+  generatedFromTripId String?
+  generatedFromTrip  Trip?      @relation("ReturnLegSource", fields: [generatedFromTripId], references: [id])
+  expiresAt         DateTime?
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  matches           Match[]
+  trips             Trip[]
+
+  @@index([status, travelDate])
+  @@index([originStopId, destinationStopId, travelDate])
+}
+
+model Match {
+  id                  String      @id @default(cuid())
+  tripRequestId       String
+  tripRequest         TripRequest @relation(fields: [tripRequestId], references: [id])
+  driverOfferId       String
+  driverOffer         DriverOffer @relation(fields: [driverOfferId], references: [id])
+  status              MatchStatus @default(PROPOSED_TO_DRIVER)
+  score               Float? // internal ranking score for candidate selection
+  proposedToDriverAt  DateTime?
+  driverRespondedAt   DateTime?
+  proposedToPassengerAt DateTime?
+  passengerRespondedAt DateTime?
+  confirmedAt         DateTime?
+  contactRevealedAt   DateTime?
+  declineReason       String?
+  createdAt           DateTime    @default(now())
+  trip                Trip?
+
+  @@index([status])
+}
+
+model Trip {
+  id                String      @id @default(cuid())
+  matchId           String      @unique
+  match             Match       @relation(fields: [matchId], references: [id])
+  driverId          String
+  driver            Driver      @relation(fields: [driverId], references: [id])
+  passengerId       String
+  passenger         Passenger   @relation(fields: [passengerId], references: [id])
+  driverOfferId     String
+  driverOffer       DriverOffer @relation(fields: [driverOfferId], references: [id])
+  status            TripStatus  @default(SCHEDULED)
+  completedAt       DateTime?
+  cancelledAt       DateTime?
+  cancelReason      String?
+  createdAt         DateTime    @default(now())
+  returnLegOffers   DriverOffer[] @relation("ReturnLegSource")
+
+  @@index([status])
+}
+
+// Telegram groups the agent is allowed to passively read, connected with admin consent.
+model TelegramGroup {
+  id              String   @id @default(cuid())
+  chatId          String   @unique
+  title           String?
+  addedByAdminId  String
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  rawMessages     RawMessage[]
+}
+
+// Every inbound message the agent ingests, for audit + debugging NLP extraction.
+model RawMessage {
+  id                  String              @id @default(cuid())
+  channel             Channel
+  chatId              String
+  telegramGroupId     String?
+  telegramGroup       TelegramGroup?      @relation(fields: [telegramGroupId], references: [id])
+  senderId            String
+  text                String
+  detectedLanguage    Language?
+  parseResult         MessageParseResult?
+  extractionConfidence Float?
+  extractionRaw       Json?
+  createdAt           DateTime            @default(now())
+  tripRequests        TripRequest[]
+  driverOffers        DriverOffer[]
+
+  @@index([channel, chatId, createdAt])
+}
+
+model AuditLogEntry {
+  id         String    @id @default(cuid())
+  actorType  ActorType
+  actorId    String? // dispatcher user id, or "agent"/"system"
+  action     String // e.g. "match.proposed", "match.confirmed", "contact.revealed", "dispatcher.override"
+  entityType String // e.g. "Match", "Trip", "TripRequest"
+  entityId   String
+  details    Json?
+  createdAt  DateTime  @default(now())
+
+  @@index([entityType, entityId])
+  @@index([createdAt])
+}
+
+model DispatcherUser {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  passwordHash String
+  role         String   @default("dispatcher") // "dispatcher" | "admin"
+  createdAt    DateTime @default(now())
+}
