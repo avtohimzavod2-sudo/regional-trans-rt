@@ -32,6 +32,9 @@ export default function DispatcherLayout({ children }: { children: React.ReactNo
             <Link href="/dispatcher/agents" className="hover:text-neutral-100">
               Агенты
             </Link>
+            <Link href="/dispatcher/mira" className="hover:text-neutral-100">
+              Mira Center
+            </Link>
             <Link href="/dispatcher/audit" className="hover:text-neutral-100">
               Журнал действий
             </Link>

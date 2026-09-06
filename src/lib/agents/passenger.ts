@@ -16,8 +16,14 @@ export const PASSENGER_AGENT_CONTRACT: AgentContract = {
   escalationRules: ["low-confidence extraction is already handled by falling back to messages.unrecognized in ingest.ts"],
 };
 
-export async function handlePassengerMessage(ctx: AgentContext, whatsappId: string, text: string, rawMessageId?: string) {
-  const request = await ingestPassengerMessage(whatsappId, text, rawMessageId);
+export async function handlePassengerMessage(
+  ctx: AgentContext,
+  whatsappId: string,
+  text: string,
+  rawMessageId?: string,
+  notify = true,
+) {
+  const request = await ingestPassengerMessage(whatsappId, text, rawMessageId, notify);
 
   await logAgentAction({
     ctx,

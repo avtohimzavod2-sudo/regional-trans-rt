@@ -83,6 +83,9 @@ enum ActorType {
 }
 
 // RT AI Workforce — named specialist agents orchestrated by RT Command.
+// MIRA is the single public-facing "Контактер RT" persona — see src/lib/mira.
+// She sits in front of COMMAND for conversational channels; she does not
+// replace COMMAND as the internal orchestrator.
 enum AgentName {
   COMMAND
   PASSENGER
@@ -97,6 +100,7 @@ enum AgentName {
   QUALITY
   ANALYTICS
   NETWORK
+  MIRA
 }
 
 enum PaymentMode {
@@ -220,39 +224,39 @@ model Stop {
 }
 
 model Passenger {
-  id             String    @id @default(cuid())
-  whatsappId     String    @unique // WhatsApp wa_id (phone-linked)
-  phone          String? // E.164, may equal whatsappId; kept private, only shared on confirmed match
-  name           String?
-  preferredLang  Language  @default(RU)
-  isBlocked      Boolean   @default(false)
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
-  requests       TripRequest[]
-  trips          Trip[]
+  id            String        @id @default(cuid())
+  whatsappId    String        @unique // WhatsApp wa_id (phone-linked)
+  phone         String? // E.164, may equal whatsappId; kept private, only shared on confirmed match
+  name          String?
+  preferredLang Language      @default(RU)
+  isBlocked     Boolean       @default(false)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  requests      TripRequest[]
+  trips         Trip[]
 }
 
 model Driver {
-  id                String       @id @default(cuid())
-  telegramUserId    String       @unique
+  id                String           @id @default(cuid())
+  telegramUserId    String           @unique
   telegramUsername  String?
   phone             String? // private, shared with passenger only on confirmed match
   name              String?
   carModel          String?
   carPlate          String?
-  preferredLang     Language     @default(RU)
-  status            DriverStatus @default(PENDING_VERIFICATION)
+  preferredLang     Language         @default(RU)
+  status            DriverStatus     @default(PENDING_VERIFICATION)
   verifiedAt        DateTime?
   verifiedByAdminId String?
   isFemale          Boolean? // self-declared, opt-in; used only to honor passenger safety preferences
   ratingAvg         Float?
-  ratingCount       Int          @default(0)
-  complaintsCount   Int          @default(0)
-  repeatScore       Int          @default(0) // RT Scout: signals of being a recurring driver on this corridor
-  category          DriverCategory @default(UNKNOWN)
+  ratingCount       Int              @default(0)
+  complaintsCount   Int              @default(0)
+  repeatScore       Int              @default(0) // RT Scout: signals of being a recurring driver on this corridor
+  category          DriverCategory   @default(UNKNOWN)
   lastScoutSeenAt   DateTime?
-  createdAt         DateTime     @default(now())
-  updatedAt         DateTime     @updatedAt
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
   offers            DriverOffer[]
   trips             Trip[]
   rtBalance         RtBalance?
@@ -262,120 +266,120 @@ model Driver {
 }
 
 model TripRequest {
-  id             String        @id @default(cuid())
-  passengerId    String
-  passenger      Passenger     @relation(fields: [passengerId], references: [id])
-  originStopId   String
-  origin         Stop          @relation("RequestOrigin", fields: [originStopId], references: [id])
-  destinationStopId String
-  destination    Stop          @relation("RequestDestination", fields: [destinationStopId], references: [id])
-  travelDate     DateTime      @db.Date
-  timeWindowStart String? // "HH:mm", free-form time-of-day preference
-  timeWindowEnd   String?
-  seats          Int           @default(1)
-  luggage        String? // free-text luggage description
-  pickupPoint    String? // free-text pickup detail within origin stop
-  femaleOnlyDriver       Boolean @default(false) // safety preference: only propose to a driver who declared isFemale
-  travelingWithChildren  Boolean @default(false)
-  status         RequestStatus @default(PENDING)
-  sourceChannel  Channel       @default(WHATSAPP)
-  rawMessageId   String?
-  rawMessage     RawMessage?   @relation(fields: [rawMessageId], references: [id])
-  expiresAt      DateTime?
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @updatedAt
-  matches        Match[]
+  id                    String        @id @default(cuid())
+  passengerId           String
+  passenger             Passenger     @relation(fields: [passengerId], references: [id])
+  originStopId          String
+  origin                Stop          @relation("RequestOrigin", fields: [originStopId], references: [id])
+  destinationStopId     String
+  destination           Stop          @relation("RequestDestination", fields: [destinationStopId], references: [id])
+  travelDate            DateTime      @db.Date
+  timeWindowStart       String? // "HH:mm", free-form time-of-day preference
+  timeWindowEnd         String?
+  seats                 Int           @default(1)
+  luggage               String? // free-text luggage description
+  pickupPoint           String? // free-text pickup detail within origin stop
+  femaleOnlyDriver      Boolean       @default(false) // safety preference: only propose to a driver who declared isFemale
+  travelingWithChildren Boolean       @default(false)
+  status                RequestStatus @default(PENDING)
+  sourceChannel         Channel       @default(WHATSAPP)
+  rawMessageId          String?
+  rawMessage            RawMessage?   @relation(fields: [rawMessageId], references: [id])
+  expiresAt             DateTime?
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+  matches               Match[]
 
   @@index([status, travelDate])
   @@index([originStopId, destinationStopId, travelDate])
 }
 
 model DriverOffer {
-  id                String      @id @default(cuid())
-  driverId          String
-  driver            Driver      @relation(fields: [driverId], references: [id])
-  originStopId      String
-  origin            Stop        @relation("OfferOrigin", fields: [originStopId], references: [id])
-  destinationStopId String
-  destination       Stop        @relation("OfferDestination", fields: [destinationStopId], references: [id])
-  travelDate        DateTime    @db.Date
-  timeWindowStart   String?
-  timeWindowEnd     String?
-  seatsTotal        Int
-  seatsAvailable    Int
-  status            OfferStatus @default(OPEN)
-  sourceChannel     Channel     @default(TELEGRAM_BOT)
-  rawMessageId      String?
-  rawMessage        RawMessage? @relation(fields: [rawMessageId], references: [id])
-  isReturnLeg       Boolean     @default(false)
+  id                  String      @id @default(cuid())
+  driverId            String
+  driver              Driver      @relation(fields: [driverId], references: [id])
+  originStopId        String
+  origin              Stop        @relation("OfferOrigin", fields: [originStopId], references: [id])
+  destinationStopId   String
+  destination         Stop        @relation("OfferDestination", fields: [destinationStopId], references: [id])
+  travelDate          DateTime    @db.Date
+  timeWindowStart     String?
+  timeWindowEnd       String?
+  seatsTotal          Int
+  seatsAvailable      Int
+  status              OfferStatus @default(OPEN)
+  sourceChannel       Channel     @default(TELEGRAM_BOT)
+  rawMessageId        String?
+  rawMessage          RawMessage? @relation(fields: [rawMessageId], references: [id])
+  isReturnLeg         Boolean     @default(false)
   generatedFromTripId String?
-  generatedFromTrip  Trip?      @relation("ReturnLegSource", fields: [generatedFromTripId], references: [id])
-  expiresAt         DateTime?
-  createdAt         DateTime    @default(now())
-  updatedAt         DateTime    @updatedAt
-  matches           Match[]
-  trips             Trip[]
+  generatedFromTrip   Trip?       @relation("ReturnLegSource", fields: [generatedFromTripId], references: [id])
+  expiresAt           DateTime?
+  createdAt           DateTime    @default(now())
+  updatedAt           DateTime    @updatedAt
+  matches             Match[]
+  trips               Trip[]
 
   @@index([status, travelDate])
   @@index([originStopId, destinationStopId, travelDate])
 }
 
 model Match {
-  id                  String      @id @default(cuid())
-  tripRequestId       String
-  tripRequest         TripRequest @relation(fields: [tripRequestId], references: [id])
-  driverOfferId       String
-  driverOffer         DriverOffer @relation(fields: [driverOfferId], references: [id])
-  status              MatchStatus @default(PROPOSED_TO_DRIVER)
-  score               Float? // internal ranking score for candidate selection
-  proposedToDriverAt  DateTime?
-  driverRespondedAt   DateTime?
+  id                    String      @id @default(cuid())
+  tripRequestId         String
+  tripRequest           TripRequest @relation(fields: [tripRequestId], references: [id])
+  driverOfferId         String
+  driverOffer           DriverOffer @relation(fields: [driverOfferId], references: [id])
+  status                MatchStatus @default(PROPOSED_TO_DRIVER)
+  score                 Float? // internal ranking score for candidate selection
+  proposedToDriverAt    DateTime?
+  driverRespondedAt     DateTime?
   proposedToPassengerAt DateTime?
-  passengerRespondedAt DateTime?
-  confirmedAt         DateTime?
-  contactRevealedAt   DateTime?
-  declineReason       String?
-  createdAt           DateTime    @default(now())
-  trip                Trip?
+  passengerRespondedAt  DateTime?
+  confirmedAt           DateTime?
+  contactRevealedAt     DateTime?
+  declineReason         String?
+  createdAt             DateTime    @default(now())
+  trip                  Trip?
 
   @@index([status])
 }
 
 model Trip {
-  id                String      @id @default(cuid())
-  matchId           String      @unique
-  match             Match       @relation(fields: [matchId], references: [id])
-  driverId          String
-  driver            Driver      @relation(fields: [driverId], references: [id])
-  passengerId       String
-  passenger         Passenger   @relation(fields: [passengerId], references: [id])
-  driverOfferId     String
-  driverOffer       DriverOffer @relation(fields: [driverOfferId], references: [id])
-  status            TripStatus  @default(SCHEDULED)
-  seats             Int         @default(1) // snapshot of TripRequest.seats at confirmation, for commission/analytics
-  paymentMode       PaymentMode?
-  totalFareSom      Int? // optional, only meaningful for PaymentMode.THROUGH_RT
-  commissionSom     Int? // snapshot of the commission charged for this trip once billed
+  id                  String        @id @default(cuid())
+  matchId             String        @unique
+  match               Match         @relation(fields: [matchId], references: [id])
+  driverId            String
+  driver              Driver        @relation(fields: [driverId], references: [id])
+  passengerId         String
+  passenger           Passenger     @relation(fields: [passengerId], references: [id])
+  driverOfferId       String
+  driverOffer         DriverOffer   @relation(fields: [driverOfferId], references: [id])
+  status              TripStatus    @default(SCHEDULED)
+  seats               Int           @default(1) // snapshot of TripRequest.seats at confirmation, for commission/analytics
+  paymentMode         PaymentMode?
+  totalFareSom        Int? // optional, only meaningful for PaymentMode.THROUGH_RT
+  commissionSom       Int? // snapshot of the commission charged for this trip once billed
   commissionChargedAt DateTime?
-  completedAt       DateTime?
-  cancelledAt       DateTime?
-  cancelReason      String?
-  createdAt         DateTime    @default(now())
-  returnLegOffers   DriverOffer[] @relation("ReturnLegSource")
-  ledgerEntries     LedgerEntry[]
-  supportCases      SupportCase[]
-  parcels           Parcel[]
+  completedAt         DateTime?
+  cancelledAt         DateTime?
+  cancelReason        String?
+  createdAt           DateTime      @default(now())
+  returnLegOffers     DriverOffer[] @relation("ReturnLegSource")
+  ledgerEntries       LedgerEntry[]
+  supportCases        SupportCase[]
+  parcels             Parcel[]
 
   @@index([status])
 }
 
 // One row per driver: running balance of commission owed to RT (negative = driver owes RT).
 model RtBalance {
-  id           String   @id @default(cuid())
-  driverId     String   @unique
-  driver       Driver   @relation(fields: [driverId], references: [id])
-  balanceSom   Int      @default(0)
-  updatedAt    DateTime @updatedAt
+  id         String   @id @default(cuid())
+  driverId   String   @unique
+  driver     Driver   @relation(fields: [driverId], references: [id])
+  balanceSom Int      @default(0)
+  updatedAt  DateTime @updatedAt
 }
 
 // Append-only commission/payment ledger. Balance-affecting entries also update RtBalance.balanceSom
@@ -401,28 +405,28 @@ model LedgerEntry {
 }
 
 model Parcel {
-  id                    String       @id @default(cuid())
-  senderName            String?
-  senderContact         String // WhatsApp id, phone, or Telegram username of the sender
-  receiverName          String?
-  receiverContact       String
-  originStopId          String
-  origin                Stop         @relation("ParcelOrigin", fields: [originStopId], references: [id])
-  destinationStopId     String
-  destination           Stop         @relation("ParcelDestination", fields: [destinationStopId], references: [id])
-  sizeType              String? // free-text: "document" | "small bag" | "box" etc.
-  description           String?
-  priceSom              Int?
-  driverId              String?
-  driver                Driver?      @relation(fields: [driverId], references: [id])
-  tripId                String?
-  trip                  Trip?        @relation(fields: [tripId], references: [id])
-  status                ParcelStatus @default(PENDING)
-  pickupConfirmedAt     DateTime?
-  deliveryConfirmedAt   DateTime?
-  cancelReason          String?
-  createdAt             DateTime     @default(now())
-  updatedAt             DateTime     @updatedAt
+  id                  String       @id @default(cuid())
+  senderName          String?
+  senderContact       String // WhatsApp id, phone, or Telegram username of the sender
+  receiverName        String?
+  receiverContact     String
+  originStopId        String
+  origin              Stop         @relation("ParcelOrigin", fields: [originStopId], references: [id])
+  destinationStopId   String
+  destination         Stop         @relation("ParcelDestination", fields: [destinationStopId], references: [id])
+  sizeType            String? // free-text: "document" | "small bag" | "box" etc.
+  description         String?
+  priceSom            Int?
+  driverId            String?
+  driver              Driver?      @relation(fields: [driverId], references: [id])
+  tripId              String?
+  trip                Trip?        @relation(fields: [tripId], references: [id])
+  status              ParcelStatus @default(PENDING)
+  pickupConfirmedAt   DateTime?
+  deliveryConfirmedAt DateTime?
+  cancelReason        String?
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
 
   @@index([status, createdAt])
 }
@@ -430,100 +434,100 @@ model Parcel {
 // RT Scout: raw driver sightings imported from Telegram/WhatsApp groups, Lalafo, or manual entry.
 // Never auto-merged into a Driver record above a low confidence threshold — always reviewable.
 model ScoutCandidate {
-  id                     String            @id @default(cuid())
-  sourceType             ScoutSourceType
-  sourceGroupId          String? // TelegramGroup.id or free-text source label
-  sourceText             String // raw announcement text, kept for audit/manual review
-  rawPhone               String?
-  rawTelegramUsername    String?
-  rawName                String?
-  rawCarModel            String?
-  rawCarPlate            String?
-  rawRouteText           String?
-  rawOriginStopId        String?
-  rawDestinationStopId   String?
-  rawTravelDate          DateTime?         @db.Date
-  rawPriceSom            Int?
-  rawSeats               Int?
-  extractionConfidence   Float?
-  normalizedPhone        String? // digits-only, used as a dedup signal
-  reviewStatus           ScoutReviewStatus @default(PENDING_REVIEW)
-  matchCandidates        Json? // top scored Driver matches: [{ driverId, confidence, signals }]
-  linkedDriverId         String?
-  linkedDriver           Driver?           @relation(fields: [linkedDriverId], references: [id])
-  reviewedByAdminId      String?
-  reviewedAt             DateTime?
-  createdAt              DateTime          @default(now())
+  id                   String            @id @default(cuid())
+  sourceType           ScoutSourceType
+  sourceGroupId        String? // TelegramGroup.id or free-text source label
+  sourceText           String // raw announcement text, kept for audit/manual review
+  rawPhone             String?
+  rawTelegramUsername  String?
+  rawName              String?
+  rawCarModel          String?
+  rawCarPlate          String?
+  rawRouteText         String?
+  rawOriginStopId      String?
+  rawDestinationStopId String?
+  rawTravelDate        DateTime?         @db.Date
+  rawPriceSom          Int?
+  rawSeats             Int?
+  extractionConfidence Float?
+  normalizedPhone      String? // digits-only, used as a dedup signal
+  reviewStatus         ScoutReviewStatus @default(PENDING_REVIEW)
+  matchCandidates      Json? // top scored Driver matches: [{ driverId, confidence, signals }]
+  linkedDriverId       String?
+  linkedDriver         Driver?           @relation(fields: [linkedDriverId], references: [id])
+  reviewedByAdminId    String?
+  reviewedAt           DateTime?
+  createdAt            DateTime          @default(now())
 
   @@index([reviewStatus, createdAt])
   @@index([normalizedPhone])
 }
 
 model SupportCase {
-  id            String            @id @default(cuid())
-  tripId        String?
-  trip          Trip?             @relation(fields: [tripId], references: [id])
-  caseType      SupportCaseType
-  status        SupportCaseStatus @default(OPEN)
-  openedByType  ActorType
-  openedById    String?
-  description   String?
-  resolution    String?
-  createdAt     DateTime          @default(now())
-  updatedAt     DateTime          @updatedAt
-  resolvedAt    DateTime?
-  escalatedAt   DateTime?
+  id           String            @id @default(cuid())
+  tripId       String?
+  trip         Trip?             @relation(fields: [tripId], references: [id])
+  caseType     SupportCaseType
+  status       SupportCaseStatus @default(OPEN)
+  openedByType ActorType
+  openedById   String?
+  description  String?
+  resolution   String?
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+  resolvedAt   DateTime?
+  escalatedAt  DateTime?
 
   @@index([status, createdAt])
 }
 
 // RT Network: partner directory (fleets, dispatchers, RT Points, last-mile partners, etc).
 model Partner {
-  id           String      @id @default(cuid())
-  type         PartnerType
-  name         String
-  contactPhone String?
+  id            String      @id @default(cuid())
+  type          PartnerType
+  name          String
+  contactPhone  String?
   contactHandle String?
-  stopId       String?
-  stop         Stop?       @relation(fields: [stopId], references: [id])
-  notes        String?
-  isActive     Boolean     @default(true)
-  createdAt    DateTime    @default(now())
+  stopId        String?
+  stop          Stop?       @relation(fields: [stopId], references: [id])
+  notes         String?
+  isActive      Boolean     @default(true)
+  createdAt     DateTime    @default(now())
 }
 
 // Telegram groups the agent is allowed to passively read, connected with admin consent.
 model TelegramGroup {
-  id              String   @id @default(cuid())
-  chatId          String   @unique
-  title           String?
-  addedByAdminId  String
-  isActive        Boolean  @default(true)
-  createdAt       DateTime @default(now())
-  rawMessages     RawMessage[]
+  id             String       @id @default(cuid())
+  chatId         String       @unique
+  title          String?
+  addedByAdminId String
+  isActive       Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+  rawMessages    RawMessage[]
 }
 
 // Every inbound message the agent ingests, for audit + debugging NLP extraction.
 model RawMessage {
-  id                  String              @id @default(cuid())
-  channel             Channel
-  chatId              String
-  telegramGroupId     String?
-  telegramGroup       TelegramGroup?      @relation(fields: [telegramGroupId], references: [id])
-  senderId            String
-  text                String
-  detectedLanguage    Language?
-  parseResult         MessageParseResult?
+  id                   String              @id @default(cuid())
+  channel              Channel
+  chatId               String
+  telegramGroupId      String?
+  telegramGroup        TelegramGroup?      @relation(fields: [telegramGroupId], references: [id])
+  senderId             String
+  text                 String
+  detectedLanguage     Language?
+  parseResult          MessageParseResult?
   extractionConfidence Float?
-  extractionRaw       Json?
-  createdAt           DateTime            @default(now())
-  tripRequests        TripRequest[]
-  driverOffers        DriverOffer[]
+  extractionRaw        Json?
+  createdAt            DateTime            @default(now())
+  tripRequests         TripRequest[]
+  driverOffers         DriverOffer[]
 
   @@index([channel, chatId, createdAt])
 }
 
 model AuditLogEntry {
-  id         String    @id @default(cuid())
+  id         String     @id @default(cuid())
   actorType  ActorType
   actorId    String? // dispatcher user id, or "agent"/"system"
   agentName  AgentName? // which RT AI Workforce agent produced this entry, if actorType = AGENT
@@ -532,7 +536,7 @@ model AuditLogEntry {
   entityType String // e.g. "Match", "Trip", "TripRequest"
   entityId   String
   details    Json?
-  createdAt  DateTime  @default(now())
+  createdAt  DateTime   @default(now())
 
   @@index([entityType, entityId])
   @@index([createdAt])
@@ -545,4 +549,308 @@ model DispatcherUser {
   passwordHash String
   role         String   @default("dispatcher") // "dispatcher" | "admin"
   createdAt    DateTime @default(now())
+}
+
+// ==========================================================================
+// MIRA — Контактер RT. Single public conversational persona in front of RT
+// Command (see src/lib/mira). Everything below is additive and does not
+// change any existing model. Loose string references (no FK) are used for
+// analytics/log-shaped rows to match the AuditLogEntry convention already
+// used elsewhere in this schema; real parent/child relations are used only
+// where one row structurally owns another (conversation -> messages,
+// benchmark run -> results).
+// ==========================================================================
+
+enum MiraRole {
+  PASSENGER
+  DRIVER
+  DISPATCHER
+  INTERMEDIARY
+  PARCEL_SENDER
+  PARTNER
+  TOURIST
+  UNKNOWN
+}
+
+enum MiraConversationStatus {
+  ACTIVE
+  AWAITING_USER
+  COMPLETED
+  ABANDONED
+  ESCALATED
+}
+
+enum MiraSenderType {
+  USER
+  MIRA
+  SYSTEM
+}
+
+enum MiraCertificationStatus {
+  TRAINEE
+  CERTIFICATION_PENDING
+  CERTIFIED
+  PRODUCTION_APPROVED
+  SUSPENDED
+}
+
+enum MiraFailureCategory {
+  LANGUAGE
+  DIALECT
+  CODE_SWITCH
+  ROLE
+  ROUTE
+  DATE
+  TIME
+  PHONE
+  PASSENGER_COUNT
+  DRIVER_SEATS
+  PARCEL
+  VOICE
+  CONTEXT
+  HALLUCINATION
+  UNNECESSARY_CLARIFICATION
+  TONE
+  SAFETY
+  PAYMENT
+  OTHER
+}
+
+enum MiraFailureStatus {
+  OPEN
+  IN_TRAINING_LOOP
+  RESOLVED
+}
+
+// One conversational session with one end user on one channel. This is the
+// "Mira Session" the spec calls for — the state COMMAND itself does not keep,
+// since COMMAND only ever sees one message at a time.
+model MiraConversation {
+  id                String                 @id @default(cuid())
+  channel           Channel
+  externalUserId    String // whatsappId / telegramUserId — same id space ingest.ts already uses
+  role              MiraRole               @default(UNKNOWN)
+  detectedLanguage  Language?
+  status            MiraConversationStatus @default(ACTIVE)
+  activeIntent      String?
+  collectedFields   Json? // fields Mira has extracted so far (route, date, seats, ...)
+  missingFields     String[] // field names still needed before COMMAND can act
+  confirmedFields   Json? // fields the user has explicitly confirmed
+  lastAgentDecision String? // last CommandResult.outcome seen for this conversation
+  lastTraceId       String? // most recent RT Command traceId this conversation drove
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+  messages          MiraMessage[]
+
+  @@index([channel, externalUserId, updatedAt])
+  @@index([status])
+}
+
+model MiraMessage {
+  id                    String           @id @default(cuid())
+  conversationId        String
+  conversation          MiraConversation @relation(fields: [conversationId], references: [id])
+  sender                MiraSenderType
+  rawText               String? // as typed by the user, or as spoken by Mira
+  audioRef              String? // opaque reference to the voice attachment, if any
+  transcript            String? // speech-to-text / audio-understanding output
+  normalizedText        String? // Mira's normalized-meaning version of rawText/transcript
+  detectedLanguage      Language?
+  languageConfidence    Float?
+  role                  MiraRole?
+  intent                String?
+  entities              Json?
+  uncertainties         String[] // parts of the message Mira was not confident about
+  requiresClarification Boolean          @default(false)
+  traceId               String? // RT Command traceId this turn produced, if any
+  createdAt             DateTime         @default(now())
+
+  @@index([conversationId, createdAt])
+}
+
+// Usage/observability log for every call to a MiraModelProvider /
+// AudioUnderstandingProvider implementation. Deliberately loose (string
+// conversationId, no FK) to match AuditLogEntry's logging convention.
+model MiraProviderCall {
+  id               String   @id @default(cuid())
+  provider         String // "google-gemini" | "mock" | ...
+  model            String
+  purpose          String // "nlu" | "reply" | "audio_transcript" | ...
+  conversationId   String?
+  traceId          String?
+  latencyMs        Int?
+  promptTokens     Int?
+  completionTokens Int?
+  estimatedCostUsd Float?
+  ok               Boolean
+  errorMessage     String?
+  createdAt        DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([provider, purpose])
+}
+
+// Curated Kyrgyz/Russian/English training corpus entry, with full provenance
+// so production training data never mixes with unlicensed/unverified data.
+model MiraTrainingExample {
+  id                           String    @id @default(cuid())
+  level                        Int // 1..30, see src/lib/mira/training/levels.ts
+  category                     String?
+  input                        String
+  inputType                    String    @default("TEXT") // "TEXT" | "VOICE_TRANSCRIPT"
+  language                     Language?
+  dialect                      String?
+  containsTypos                Boolean   @default(false)
+  containsRussianMix           Boolean   @default(false)
+  containsMissingKyrgyzLetters Boolean   @default(false)
+  expectedRole                 MiraRole?
+  expectedIntent               String?
+  expectedNormalizedData       Json?
+  source                       String // e.g. "synthetic", "rt-sanitized", "akylai-reference"
+  sourceType                   String // ProvenanceMetadata.sourceType
+  license                      String?
+  verified                     Boolean   @default(false)
+  reviewedByHuman              Boolean   @default(false)
+  allowedForTraining           Boolean   @default(true)
+  allowedForEvaluation         Boolean   @default(true)
+  privacyStatus                String    @default("SYNTHETIC") // "SYNTHETIC" | "SANITIZED" | "REDACTION_PENDING"
+  notes                        String?
+  createdAt                    DateTime  @default(now())
+
+  @@index([level])
+  @@index([language])
+  @@index([sourceType])
+}
+
+// A single RT Kyrgyz Benchmark case. Not a unit test — a labeled example run
+// through the real Mira pipeline and scored against KPI thresholds.
+model MiraBenchmarkCase {
+  id                           String                @id @default(cuid())
+  code                         String                @unique // e.g. "KY-LIT-001"
+  input                        String
+  inputType                    String                @default("TEXT")
+  expectedRole                 MiraRole?
+  expectedIntent               String?
+  expectedLanguage             Language?
+  expectedNormalizedData       Json?
+  allowedAlternatives          Json?
+  difficulty                   String                @default("MEDIUM") // "EASY" | "MEDIUM" | "HARD" | "ADVERSARIAL"
+  dialect                      String?
+  containsTypos                Boolean               @default(false)
+  containsRussianMix           Boolean               @default(false)
+  containsMissingKyrgyzLetters Boolean               @default(false)
+  containsVoice                Boolean               @default(false)
+  sourceClass                  String                @default("SYNTHETIC")
+  privacyStatus                String                @default("SYNTHETIC")
+  humanVerified                Boolean               @default(false)
+  tags                         String[]
+  createdAt                    DateTime              @default(now())
+  results                      MiraBenchmarkResult[]
+
+  @@index([difficulty])
+}
+
+model MiraBenchmarkRun {
+  id                 String                @id @default(cuid())
+  provider           String
+  model              String
+  startedAt          DateTime              @default(now())
+  finishedAt         DateTime?
+  totalCases         Int                   @default(0)
+  passedCases        Int                   @default(0)
+  roleAccuracy       Float?
+  routeAccuracy      Float?
+  dateTimeAccuracy   Float?
+  seatAccuracy       Float?
+  phoneAccuracy      Float?
+  hallucinationCount Int                   @default(0)
+  overallScore       Float?
+  notes              String?
+  results            MiraBenchmarkResult[]
+}
+
+model MiraBenchmarkResult {
+  id                   String               @id @default(cuid())
+  runId                String
+  run                  MiraBenchmarkRun     @relation(fields: [runId], references: [id])
+  caseId               String
+  case                 MiraBenchmarkCase    @relation(fields: [caseId], references: [id])
+  passed               Boolean
+  actualRole           MiraRole?
+  actualIntent         String?
+  actualNormalizedData Json?
+  actualReplyText      String?
+  failureCategory      MiraFailureCategory?
+  details              Json?
+  createdAt            DateTime             @default(now())
+
+  @@index([runId])
+  @@index([caseId])
+}
+
+// Human Language Review — a dispatcher/reviewer grading one real or
+// benchmark Mira answer for grammar/naturalness/meaning/etc.
+model MiraHumanReview {
+  id                      String    @id @default(cuid())
+  conversationId          String?
+  messageId               String?
+  benchmarkResultId       String?
+  input                   String
+  miraAnswer              String
+  normalizedData          Json?
+  detectedLanguage        Language?
+  expectedMeaning         String?
+  agentTrace              Json?
+  grammar                 Int? // 1..5
+  naturalness             Int? // 1..5
+  meaning                 Int? // 1..5
+  politeness              Int? // 1..5
+  dialectUnderstanding    Int? // 1..5
+  codeSwitchUnderstanding Int? // 1..5
+  hallucination           Boolean   @default(false)
+  overallScore            Float?
+  comments                String?
+  reviewedByAdminId       String?
+  createdAt               DateTime  @default(now())
+
+  @@index([createdAt])
+}
+
+// Certification history. The most recent row (by createdAt) is Mira's
+// current status; never set PRODUCTION_APPROVED programmatically.
+model MiraCertification {
+  id                String                  @id @default(cuid())
+  status            MiraCertificationStatus @default(TRAINEE)
+  benchmarkRunId    String?
+  roleAccuracy      Float?
+  routeAccuracy     Float?
+  dateTimeAccuracy  Float?
+  seatAccuracy      Float?
+  phoneAccuracy     Float?
+  hallucinationRate Float?
+  decidedByAdminId  String?
+  notes             String?
+  createdAt         DateTime                @default(now())
+
+  @@index([createdAt])
+}
+
+// Training-failure loop: every detected Mira failure becomes a row here,
+// then (once reviewed) a MiraBenchmarkCase / MiraTrainingExample.
+model MiraLanguageFailure {
+  id                      String              @id @default(cuid())
+  conversationId          String?
+  messageId               String?
+  category                MiraFailureCategory
+  inputSanitized          String
+  expectedAnswer          String?
+  actualAnswer            String?
+  detectedLanguage        Language?
+  notes                   String?
+  status                  MiraFailureStatus   @default(OPEN)
+  resolvedBenchmarkCaseId String?
+  createdAt               DateTime            @default(now())
+
+  @@index([status])
+  @@index([category])
 }

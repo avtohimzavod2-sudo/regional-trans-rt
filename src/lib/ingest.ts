@@ -53,7 +53,7 @@ async function resolveStopIdByKey(key: string, corridorKey = PILOT_CORRIDOR_KEY)
   return stop?.id ?? null;
 }
 
-export async function ingestPassengerMessage(whatsappId: string, text: string, rawMessageId?: string) {
+export async function ingestPassengerMessage(whatsappId: string, text: string, rawMessageId?: string, notify = true) {
   const stops = await getPilotCorridorStops();
   const { result, origin, destination } = await extractTripMessage({
     text,
@@ -71,20 +71,20 @@ export async function ingestPassengerMessage(whatsappId: string, text: string, r
     !result.travelDate ||
     !result.seats
   ) {
-    await sendWhatsAppText(whatsappId, messages.unrecognized[lang]);
+    if (notify) await sendWhatsAppText(whatsappId, messages.unrecognized[lang]);
     return null;
   }
 
   const travelDate = parseTravelDate(result.travelDate);
   if (!travelDate) {
-    await sendWhatsAppText(whatsappId, messages.unrecognized[lang]);
+    if (notify) await sendWhatsAppText(whatsappId, messages.unrecognized[lang]);
     return null;
   }
 
   const originStopId = await resolveStopIdByKey(origin.key);
   const destinationStopId = await resolveStopIdByKey(destination.key);
   if (!originStopId || !destinationStopId) {
-    await sendWhatsAppText(whatsappId, messages.unrecognized[lang]);
+    if (notify) await sendWhatsAppText(whatsappId, messages.unrecognized[lang]);
     return null;
   }
 
@@ -113,14 +113,16 @@ export async function ingestPassengerMessage(whatsappId: string, text: string, r
     details: { confidence: result.confidence },
   });
 
-  await sendWhatsAppText(
-    whatsappId,
-    messages.requestReceived[lang](
-      { ru: request.origin.nameRu, ky: request.origin.nameKy, en: request.origin.nameEn },
-      { ru: request.destination.nameRu, ky: request.destination.nameKy, en: request.destination.nameEn },
-      lang,
-    ),
-  );
+  if (notify) {
+    await sendWhatsAppText(
+      whatsappId,
+      messages.requestReceived[lang](
+        { ru: request.origin.nameRu, ky: request.origin.nameKy, en: request.origin.nameEn },
+        { ru: request.destination.nameRu, ky: request.destination.nameKy, en: request.destination.nameEn },
+        lang,
+      ),
+    );
+  }
 
   await proposeMatchesForRequest(request.id);
   return request;
@@ -131,6 +133,7 @@ export async function ingestDriverPrivateMessage(
   telegramUsername: string | null,
   text: string,
   rawMessageId?: string,
+  notify = true,
 ) {
   const stops = await getPilotCorridorStops();
   const { result, origin, destination } = await extractTripMessage({
@@ -143,20 +146,20 @@ export async function ingestDriverPrivateMessage(
   const driver = await findOrCreateDriver(telegramUserId, telegramUsername, lang);
 
   if (result.kind !== "DRIVER_OFFER" || !origin || !destination || !result.travelDate || !result.seats) {
-    await sendTelegramMessage(telegramUserId, messages.unrecognized[lang]);
+    if (notify) await sendTelegramMessage(telegramUserId, messages.unrecognized[lang]);
     return null;
   }
 
   const travelDate = parseTravelDate(result.travelDate);
   if (!travelDate) {
-    await sendTelegramMessage(telegramUserId, messages.unrecognized[lang]);
+    if (notify) await sendTelegramMessage(telegramUserId, messages.unrecognized[lang]);
     return null;
   }
 
   const originStopId = await resolveStopIdByKey(origin.key);
   const destinationStopId = await resolveStopIdByKey(destination.key);
   if (!originStopId || !destinationStopId) {
-    await sendTelegramMessage(telegramUserId, messages.unrecognized[lang]);
+    if (notify) await sendTelegramMessage(telegramUserId, messages.unrecognized[lang]);
     return null;
   }
 
@@ -188,15 +191,17 @@ export async function ingestDriverPrivateMessage(
     details: { confidence: result.confidence },
   });
 
-  await sendTelegramMessage(
-    telegramUserId,
-    messages.offerReceived[lang](
-      { ru: offer.origin.nameRu, ky: offer.origin.nameKy, en: offer.origin.nameEn },
-      { ru: offer.destination.nameRu, ky: offer.destination.nameKy, en: offer.destination.nameEn },
-      lang,
-      offer.seatsAvailable,
-    ),
-  );
+  if (notify) {
+    await sendTelegramMessage(
+      telegramUserId,
+      messages.offerReceived[lang](
+        { ru: offer.origin.nameRu, ky: offer.origin.nameKy, en: offer.origin.nameEn },
+        { ru: offer.destination.nameRu, ky: offer.destination.nameKy, en: offer.destination.nameEn },
+        lang,
+        offer.seatsAvailable,
+      ),
+    );
+  }
 
   if (driver.status === "ACTIVE") {
     await proposeMatchesForOffer(offer.id);

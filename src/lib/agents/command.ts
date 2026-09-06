@@ -35,6 +35,10 @@ export interface InboundMessage {
   telegramGroupId?: string; // required for TELEGRAM_GROUP
   chatId?: string; // required for TELEGRAM_GROUP
   rawMessageId?: string;
+  /** false when Mira (src/lib/mira/orchestrator.ts) owns the outward reply
+   * and RT Command's own template send would double-message the user.
+   * Defaults to true so every existing caller keeps sending as before. */
+  notify?: boolean;
 }
 
 export type RouteDecision =
@@ -91,11 +95,11 @@ async function tryOpenCancellationCase(ctx: AgentContext, msg: InboundMessage) {
 async function dispatchIngest(ctx: AgentContext, kind: Exclude<RouteDecision["kind"], "ATTEMPT_CANCELLATION_THEN_INGEST">, msg: InboundMessage): Promise<CommandResult> {
   switch (kind) {
     case "INGEST_PASSENGER": {
-      const request = await handlePassengerMessage(nextHop(ctx), msg.senderId, msg.text, msg.rawMessageId);
+      const request = await handlePassengerMessage(nextHop(ctx), msg.senderId, msg.text, msg.rawMessageId, msg.notify ?? true);
       return { traceId: ctx.traceId, routedTo: ["COMMAND", "PASSENGER"], outcome: request ? "trip_request_created" : "unrecognized", data: request };
     }
     case "INGEST_DRIVER": {
-      const offer = await handleDriverMessage(nextHop(ctx), msg.senderId, msg.senderUsername ?? null, msg.text, msg.rawMessageId);
+      const offer = await handleDriverMessage(nextHop(ctx), msg.senderId, msg.senderUsername ?? null, msg.text, msg.rawMessageId, msg.notify ?? true);
       return { traceId: ctx.traceId, routedTo: ["COMMAND", "DRIVER"], outcome: offer ? "driver_offer_created" : "unrecognized", data: offer };
     }
     case "SKIP_GROUP_MESSAGE": {

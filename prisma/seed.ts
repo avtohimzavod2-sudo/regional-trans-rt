@@ -1,5 +1,7 @@
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, type Prisma } from "@prisma/client";
 import { hashPassword } from "../src/lib/auth/password";
+import { BENCHMARK_CASES } from "../src/lib/mira/training/benchmark-cases";
+import { TRAINING_CORPUS } from "../src/lib/mira/training/corpus";
 
 const db = new PrismaClient();
 
@@ -41,6 +43,88 @@ async function main() {
 
   console.log(`Seeded corridor "${corridor.nameRu}" with ${PILOT_STOPS.length} stops.`);
   console.log(`Dispatcher user ready: ${adminUsername} (password from SEED_DISPATCHER_PASSWORD or default "changeme123" — change it).`);
+
+  // MIRA KYRGYZ TRAINING — synthetic-only seed data. Idempotent: benchmark
+  // cases upsert by their unique `code`; training examples are skipped if
+  // an entry with the same `input` already exists. Never seeds real user
+  // conversation data — see src/lib/mira/training/provenance.ts.
+  for (const c of BENCHMARK_CASES) {
+    await db.miraBenchmarkCase.upsert({
+      where: { code: c.code },
+      update: {
+        input: c.input,
+        inputType: c.inputType,
+        expectedRole: c.expectedRole,
+        expectedIntent: c.expectedIntent,
+        expectedLanguage: c.expectedLanguage,
+        expectedNormalizedData: c.expectedNormalizedData as Prisma.InputJsonValue | undefined,
+        difficulty: c.difficulty,
+        dialect: c.dialect,
+        containsTypos: c.containsTypos ?? false,
+        containsRussianMix: c.containsRussianMix ?? false,
+        containsMissingKyrgyzLetters: c.containsMissingKyrgyzLetters ?? false,
+        containsVoice: c.containsVoice ?? false,
+        sourceClass: c.sourceClass,
+        privacyStatus: c.privacyStatus,
+        humanVerified: c.humanVerified,
+        tags: c.tags,
+      },
+      create: {
+        code: c.code,
+        input: c.input,
+        inputType: c.inputType,
+        expectedRole: c.expectedRole,
+        expectedIntent: c.expectedIntent,
+        expectedLanguage: c.expectedLanguage,
+        expectedNormalizedData: c.expectedNormalizedData as Prisma.InputJsonValue | undefined,
+        difficulty: c.difficulty,
+        dialect: c.dialect,
+        containsTypos: c.containsTypos ?? false,
+        containsRussianMix: c.containsRussianMix ?? false,
+        containsMissingKyrgyzLetters: c.containsMissingKyrgyzLetters ?? false,
+        containsVoice: c.containsVoice ?? false,
+        sourceClass: c.sourceClass,
+        privacyStatus: c.privacyStatus,
+        humanVerified: c.humanVerified,
+        tags: c.tags,
+      },
+    });
+  }
+
+  let trainingExamplesCreated = 0;
+  for (const entry of TRAINING_CORPUS) {
+    const existing = await db.miraTrainingExample.findFirst({ where: { input: entry.input } });
+    if (existing) continue;
+    await db.miraTrainingExample.create({
+      data: {
+        level: entry.level,
+        category: entry.category,
+        input: entry.input,
+        inputType: entry.inputType,
+        language: entry.language,
+        dialect: entry.dialect,
+        containsTypos: entry.containsTypos ?? false,
+        containsRussianMix: entry.containsRussianMix ?? false,
+        containsMissingKyrgyzLetters: entry.containsMissingKyrgyzLetters ?? false,
+        expectedRole: entry.expectedRole,
+        expectedIntent: entry.expectedIntent,
+        expectedNormalizedData: entry.expectedNormalizedData as Prisma.InputJsonValue | undefined,
+        source: entry.provenance.source,
+        sourceType: entry.provenance.sourceType,
+        license: entry.provenance.license,
+        verified: false,
+        reviewedByHuman: false,
+        allowedForTraining: entry.provenance.allowedForTraining,
+        allowedForEvaluation: entry.provenance.allowedForEvaluation,
+        privacyStatus: entry.provenance.privacyStatus,
+        notes: entry.notes,
+      },
+    });
+    trainingExamplesCreated++;
+  }
+
+  console.log(`Seeded ${BENCHMARK_CASES.length} RT Kyrgyz Benchmark cases (upserted).`);
+  console.log(`Seeded ${trainingExamplesCreated} new synthetic training examples (${TRAINING_CORPUS.length - trainingExamplesCreated} already present).`);
 }
 
 main()

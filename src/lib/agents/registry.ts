@@ -15,8 +15,10 @@ import { SCOUT_AGENT_CONTRACT } from "./scout";
 import { QUALITY_AGENT_CONTRACT } from "./quality";
 import { ANALYTICS_AGENT_CONTRACT } from "./analytics";
 import { NETWORK_AGENT_CONTRACT } from "./network";
+import { MIRA_AGENT_CONTRACT } from "@/lib/mira/orchestrator";
 
 export const AGENT_REGISTRY: AgentContract[] = [
+  MIRA_AGENT_CONTRACT,
   COMMAND_AGENT_CONTRACT,
   PASSENGER_AGENT_CONTRACT,
   DRIVER_AGENT_CONTRACT,

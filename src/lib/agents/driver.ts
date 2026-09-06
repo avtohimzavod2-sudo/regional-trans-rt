@@ -22,8 +22,9 @@ export async function handleDriverMessage(
   telegramUsername: string | null,
   text: string,
   rawMessageId?: string,
+  notify = true,
 ) {
-  const offer = await ingestDriverPrivateMessage(telegramUserId, telegramUsername, text, rawMessageId);
+  const offer = await ingestDriverPrivateMessage(telegramUserId, telegramUsername, text, rawMessageId, notify);
 
   await logAgentAction({
     ctx,

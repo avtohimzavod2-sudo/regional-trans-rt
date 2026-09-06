@@ -39,7 +39,52 @@ src/lib/messaging/           адаптеры Telegram (grammy) и WhatsApp Clou
 src/lib/ingest.ts            приём сообщений -> NLP -> запись в БД -> запуск матчинга
 src/app/api/webhooks/        вебхуки Telegram и WhatsApp
 src/app/dispatcher/          диспетчерская панель (ручное вмешательство, журнал аудита)
+src/lib/mira/                МИРА (Контактер RT) — единая публичная персона поверх RT Command
+src/lib/mira/training/       MIRA KYRGYZ TRAINING: 30-уровневая программа, корпус, бенчмарк, KPI, сертификация
+src/app/dispatcher/(app)/mira/  Mira Center — панель обучения/бенчмарка/сертификации Миры
 ```
+
+## МИРА — Контактер RT
+
+Мира — единая публичная точка входа для пассажиров, водителей, туристов, посредников и
+отправителей посылок. Наружу существует только один персонаж: «МИРА, Regional Trans RT» —
+внутренние агенты RT AI Workforce и их имена никогда не раскрываются пользователю (только во
+внутреннем журнале аудита, вкладка «Трасса агентов» в Mira Center).
+
+Архитектура: **ЧЕЛОВЕК → МИРА → RT COMMAND → специализированные агенты → RT COMMAND → МИРА → ЧЕЛОВЕК**.
+Мира — не второй оркестратор: RT COMMAND остаётся единственным внутренним управляющим циклом
+(`src/lib/agents/command.ts`); Мира лишь понимает язык на входе и формулирует ответ на выходе
+(`src/lib/mira/orchestrator.ts`).
+
+Ключевые свойства:
+
+- **Kyrgyz-first**: литературный кыргызский, падежи, числительные, даты/время, топонимы,
+  разговорная речь, диалекты, кыргызский без ң/ө/ү, латиница, KY/RU code-switching, опечатки —
+  без исправления или стыда пользователя за форму речи (`src/lib/mira/language/`).
+- **Zero-tolerance anti-hallucination**: Мира никогда не выдумывает водителя, машину, номер,
+  телефон, цену, скидку, комиссию, статус оплаты/бронирования/рейтинга/посылки/чека/возврата
+  (`src/lib/mira/safety.ts`).
+- **MIRA KYRGYZ TRAINING** (`src/lib/mira/training/`) — 30-уровневая учебная программа
+  (`levels.ts`), синтетический учебный корпус с провенансом (`corpus.ts`, `provenance.ts`),
+  конвейер санитизации PII для будущего импорта реальных диалогов (`sanitize.ts`), RT Kyrgyz
+  Benchmark из размеченных кейсов, включая adversarial-инъекции (`benchmark-cases.ts`),
+  раннер бенчмарка поверх реального пайплайна (`benchmark.ts`), расчёт KPI (`kpi.ts`) и решение
+  о сертификации (`certification.ts`).
+- **Сертификация только вручную**: автоматический прогон бенчмарка может присвоить лишь
+  `TRAINEE` или `CERTIFICATION_PENDING` — статусы `CERTIFIED`/`PRODUCTION_APPROVED` выставляются
+  исключительно человеком через Prisma Studio/будущий admin-экран, никогда программно.
+- **Провайдер ИИ через абстракцию**: `MiraModelProvider` (`src/lib/mira/providers/`) — по
+  умолчанию детерминированный мок без сети/ключей; реальная модель — Google Gemini Flash,
+  включается `MIRA_AI_PROVIDER=google` при наличии `MIRA_GEMINI_API_KEY`. Аналогично устроены
+  `AudioUnderstandingProvider` (распознавание голоса) и `MiraVoiceOutputProvider` (синтез речи,
+  пока не реализован — текст всегда остаётся резервным каналом).
+- **Mira Center** (`/dispatcher/mira`) — обзор, статус провайдера, диалоги, языки, обучение,
+  бенчмарк (с кнопкой запуска), ошибки (Training Failure Loop), human review, аудио-диагностика,
+  сертификационная карточка, трасса агентов.
+
+Голосовой приём (Telegram/WhatsApp voice) на данный момент — архитектурная заглушка: сама
+абстракция готова (`AudioUnderstandingProvider`), но скачивание голосовых вложений из вебхуков
+ещё не подключено, поэтому в проде голос сейчас не обрабатывается.
 
 ## Запуск локально
 
@@ -66,6 +111,9 @@ src/app/dispatcher/          диспетчерская панель (ручно
 | `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID` | [Meta for Developers](https://developers.facebook.com/) → WhatsApp → API Setup. Требуется верифицированный WhatsApp Business аккаунт. |
 | `WHATSAPP_VERIFY_TOKEN` | Придумайте любую строку и укажите её же при настройке webhook в Meta. |
 | `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/) — используется для извлечения заявок из текста на русском/кыргызском/английском. |
+| `MIRA_AI_PROVIDER` | `mock` (по умолчанию, без ключей) или `google`. Мока достаточно для разработки, тестов и демонстрации Mira Center. |
+| `MIRA_GEMINI_API_KEY`, `MIRA_GEMINI_MODEL` | Нужны только при `MIRA_AI_PROVIDER=google`. Ключ — [Google AI Studio](https://aistudio.google.com/). Без ключа приложение не падает — Мира работает на моке, а «Провайдер» в Mira Center покажет «не готов». |
+| `MIRA_AUDIO_PROVIDER` | `mock` (по умолчанию) или `google`. Реальный приём голосовых сообщений из Telegram/WhatsApp пока не подключён к вебхукам — это архитектурная заглушка. |
 
 Ни один из этих сервисов не подключается автоматически — агент не может получить доступ к
 WhatsApp Business, Telegram-группам или базе данных без того, чтобы вы явно выдали

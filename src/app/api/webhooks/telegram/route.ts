@@ -1,6 +1,7 @@
 import { webhookCallback } from "grammy";
 import { getTelegramBot } from "@/lib/messaging/telegram";
 import { handleInboundMessage } from "@/lib/agents/command";
+import { handleMiraInbound } from "@/lib/mira/orchestrator";
 import { handleDriverResponse } from "@/lib/matching/orchestrate";
 import { messages, detectLangFallback } from "@/lib/i18n/messages";
 import { db } from "@/lib/db";
@@ -19,7 +20,9 @@ function bot() {
 
     b.on("message:text", async (ctx) => {
       if (ctx.chat.type === "private") {
-        await handleInboundMessage({
+        // Private chats go through Mira so she owns the single outward reply;
+        // RT Command's own template send is suppressed (notify:false inside).
+        await handleMiraInbound({
           channel: "TELEGRAM_BOT",
           senderId: String(ctx.from.id),
           senderUsername: ctx.from.username ?? null,
