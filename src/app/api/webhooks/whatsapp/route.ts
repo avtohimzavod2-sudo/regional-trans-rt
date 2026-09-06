@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { parseWhatsAppWebhookPayload, verifyWhatsAppWebhook } from "@/lib/messaging/whatsapp";
-import { ingestPassengerMessage } from "@/lib/ingest";
+import { handleInboundMessage } from "@/lib/agents/command";
 import { handlePassengerResponse } from "@/lib/matching/orchestrate";
 
 export async function GET(req: NextRequest) {
@@ -19,7 +19,7 @@ export async function POST(req: NextRequest) {
   const { texts, buttonReplies } = parseWhatsAppWebhookPayload(payload);
 
   for (const msg of texts) {
-    await ingestPassengerMessage(msg.from, msg.text, msg.messageId);
+    await handleInboundMessage({ channel: "WHATSAPP", senderId: msg.from, text: msg.text, rawMessageId: msg.messageId });
   }
 
   for (const reply of buttonReplies) {

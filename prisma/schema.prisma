@@ -82,6 +82,107 @@ enum ActorType {
   SYSTEM
 }
 
+// RT AI Workforce — named specialist agents orchestrated by RT Command.
+enum AgentName {
+  COMMAND
+  PASSENGER
+  DRIVER
+  MATCH
+  ROUTE
+  TRUST
+  PAY
+  SUPPORT
+  PARCEL
+  SCOUT
+  QUALITY
+  ANALYTICS
+  NETWORK
+}
+
+enum PaymentMode {
+  DRIVER_DIRECT_RT_BALANCE // driver collects fare in person; RT debits driver's RT Balance for the commission
+  THROUGH_RT // passenger pays RT; RT keeps commission and pays out the remainder to the driver
+}
+
+enum LedgerEntryType {
+  COMMISSION_CHARGE
+  TOPUP
+  PAYMENT_COLLECTED
+  PAYOUT
+  REFUND
+  ADJUSTMENT
+}
+
+enum LedgerEntryStatus {
+  POSTED
+  REVERSED
+}
+
+enum ParcelStatus {
+  PENDING
+  ASSIGNED
+  PICKED_UP
+  IN_TRANSIT
+  DELIVERED
+  CANCELLED
+  DISPUTED
+}
+
+enum ScoutSourceType {
+  TELEGRAM_GROUP
+  WHATSAPP_GROUP
+  LALAFO
+  MANUAL_IMPORT
+  INTERNAL
+}
+
+enum ScoutReviewStatus {
+  PENDING_REVIEW
+  AUTO_LINKED
+  MANUALLY_LINKED
+  REJECTED
+  NEW_DRIVER_CREATED
+}
+
+enum DriverCategory {
+  UNKNOWN
+  OCCASIONAL
+  REGULAR
+  ANCHOR
+  DISPATCHER_FLEET
+}
+
+enum SupportCaseType {
+  DRIVER_NO_SHOW
+  PASSENGER_NO_SHOW
+  CANCELLATION
+  LATE
+  DISPUTE
+  REFUND_REQUEST
+  ROUTE_CHANGE
+  OTHER
+}
+
+enum SupportCaseStatus {
+  OPEN
+  IN_PROGRESS
+  ESCALATED
+  RESOLVED
+  CLOSED
+}
+
+enum PartnerType {
+  DRIVER_FLEET
+  DISPATCHER
+  RT_POINT
+  CAFE
+  GAS_STATION
+  SUPERMARKET
+  COURIER
+  LAST_MILE
+  OTHER
+}
+
 // Ordered corridor of stops, e.g. Bishkek -> Balykchy -> Cholpon-Ata -> Bosteri -> Karakol.
 // Direction of travel is inferred by comparing `order` of origin vs destination stop.
 model Corridor {
@@ -110,6 +211,9 @@ model Stop {
   requestsAsDestination TripRequest[] @relation("RequestDestination")
   offersAsOrigin        DriverOffer[] @relation("OfferOrigin")
   offersAsDestination   DriverOffer[] @relation("OfferDestination")
+  parcelsAsOrigin       Parcel[]      @relation("ParcelOrigin")
+  parcelsAsDestination  Parcel[]      @relation("ParcelDestination")
+  partners              Partner[]
 
   @@unique([corridorId, key])
   @@index([corridorId, order])
@@ -140,10 +244,21 @@ model Driver {
   status            DriverStatus @default(PENDING_VERIFICATION)
   verifiedAt        DateTime?
   verifiedByAdminId String?
+  isFemale          Boolean? // self-declared, opt-in; used only to honor passenger safety preferences
+  ratingAvg         Float?
+  ratingCount       Int          @default(0)
+  complaintsCount   Int          @default(0)
+  repeatScore       Int          @default(0) // RT Scout: signals of being a recurring driver on this corridor
+  category          DriverCategory @default(UNKNOWN)
+  lastScoutSeenAt   DateTime?
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
   offers            DriverOffer[]
   trips             Trip[]
+  rtBalance         RtBalance?
+  ledgerEntries     LedgerEntry[]
+  scoutCandidates   ScoutCandidate[]
+  parcels           Parcel[]
 }
 
 model TripRequest {
@@ -160,6 +275,8 @@ model TripRequest {
   seats          Int           @default(1)
   luggage        String? // free-text luggage description
   pickupPoint    String? // free-text pickup detail within origin stop
+  femaleOnlyDriver       Boolean @default(false) // safety preference: only propose to a driver who declared isFemale
+  travelingWithChildren  Boolean @default(false)
   status         RequestStatus @default(PENDING)
   sourceChannel  Channel       @default(WHATSAPP)
   rawMessageId   String?
@@ -235,13 +352,143 @@ model Trip {
   driverOfferId     String
   driverOffer       DriverOffer @relation(fields: [driverOfferId], references: [id])
   status            TripStatus  @default(SCHEDULED)
+  seats             Int         @default(1) // snapshot of TripRequest.seats at confirmation, for commission/analytics
+  paymentMode       PaymentMode?
+  totalFareSom      Int? // optional, only meaningful for PaymentMode.THROUGH_RT
+  commissionSom     Int? // snapshot of the commission charged for this trip once billed
+  commissionChargedAt DateTime?
   completedAt       DateTime?
   cancelledAt       DateTime?
   cancelReason      String?
   createdAt         DateTime    @default(now())
   returnLegOffers   DriverOffer[] @relation("ReturnLegSource")
+  ledgerEntries     LedgerEntry[]
+  supportCases      SupportCase[]
+  parcels           Parcel[]
 
   @@index([status])
+}
+
+// One row per driver: running balance of commission owed to RT (negative = driver owes RT).
+model RtBalance {
+  id           String   @id @default(cuid())
+  driverId     String   @unique
+  driver       Driver   @relation(fields: [driverId], references: [id])
+  balanceSom   Int      @default(0)
+  updatedAt    DateTime @updatedAt
+}
+
+// Append-only commission/payment ledger. Balance-affecting entries also update RtBalance.balanceSom
+// transactionally; PAYMENT_COLLECTED/PAYOUT are informational records of the THROUGH_RT settlement flow.
+model LedgerEntry {
+  id          String            @id @default(cuid())
+  driverId    String
+  driver      Driver            @relation(fields: [driverId], references: [id])
+  tripId      String?
+  trip        Trip?             @relation(fields: [tripId], references: [id])
+  type        LedgerEntryType
+  status      LedgerEntryStatus @default(POSTED)
+  paymentMode PaymentMode?
+  amountSom   Int // signed: negative = debit from driver's RT Balance, positive = credit
+  description String?
+  actorType   ActorType
+  actorId     String?
+  createdAt   DateTime          @default(now())
+  reversedAt  DateTime?
+
+  @@index([driverId, createdAt])
+  @@index([tripId])
+}
+
+model Parcel {
+  id                    String       @id @default(cuid())
+  senderName            String?
+  senderContact         String // WhatsApp id, phone, or Telegram username of the sender
+  receiverName          String?
+  receiverContact       String
+  originStopId          String
+  origin                Stop         @relation("ParcelOrigin", fields: [originStopId], references: [id])
+  destinationStopId     String
+  destination           Stop         @relation("ParcelDestination", fields: [destinationStopId], references: [id])
+  sizeType              String? // free-text: "document" | "small bag" | "box" etc.
+  description           String?
+  priceSom              Int?
+  driverId              String?
+  driver                Driver?      @relation(fields: [driverId], references: [id])
+  tripId                String?
+  trip                  Trip?        @relation(fields: [tripId], references: [id])
+  status                ParcelStatus @default(PENDING)
+  pickupConfirmedAt     DateTime?
+  deliveryConfirmedAt   DateTime?
+  cancelReason          String?
+  createdAt             DateTime     @default(now())
+  updatedAt             DateTime     @updatedAt
+
+  @@index([status, createdAt])
+}
+
+// RT Scout: raw driver sightings imported from Telegram/WhatsApp groups, Lalafo, or manual entry.
+// Never auto-merged into a Driver record above a low confidence threshold — always reviewable.
+model ScoutCandidate {
+  id                     String            @id @default(cuid())
+  sourceType             ScoutSourceType
+  sourceGroupId          String? // TelegramGroup.id or free-text source label
+  sourceText             String // raw announcement text, kept for audit/manual review
+  rawPhone               String?
+  rawTelegramUsername    String?
+  rawName                String?
+  rawCarModel            String?
+  rawCarPlate            String?
+  rawRouteText           String?
+  rawOriginStopId        String?
+  rawDestinationStopId   String?
+  rawTravelDate          DateTime?         @db.Date
+  rawPriceSom            Int?
+  rawSeats               Int?
+  extractionConfidence   Float?
+  normalizedPhone        String? // digits-only, used as a dedup signal
+  reviewStatus           ScoutReviewStatus @default(PENDING_REVIEW)
+  matchCandidates        Json? // top scored Driver matches: [{ driverId, confidence, signals }]
+  linkedDriverId         String?
+  linkedDriver           Driver?           @relation(fields: [linkedDriverId], references: [id])
+  reviewedByAdminId      String?
+  reviewedAt             DateTime?
+  createdAt              DateTime          @default(now())
+
+  @@index([reviewStatus, createdAt])
+  @@index([normalizedPhone])
+}
+
+model SupportCase {
+  id            String            @id @default(cuid())
+  tripId        String?
+  trip          Trip?             @relation(fields: [tripId], references: [id])
+  caseType      SupportCaseType
+  status        SupportCaseStatus @default(OPEN)
+  openedByType  ActorType
+  openedById    String?
+  description   String?
+  resolution    String?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+  resolvedAt    DateTime?
+  escalatedAt   DateTime?
+
+  @@index([status, createdAt])
+}
+
+// RT Network: partner directory (fleets, dispatchers, RT Points, last-mile partners, etc).
+model Partner {
+  id           String      @id @default(cuid())
+  type         PartnerType
+  name         String
+  contactPhone String?
+  contactHandle String?
+  stopId       String?
+  stop         Stop?       @relation(fields: [stopId], references: [id])
+  notes        String?
+  isActive     Boolean     @default(true)
+  createdAt    DateTime    @default(now())
 }
 
 // Telegram groups the agent is allowed to passively read, connected with admin consent.
@@ -279,6 +526,8 @@ model AuditLogEntry {
   id         String    @id @default(cuid())
   actorType  ActorType
   actorId    String? // dispatcher user id, or "agent"/"system"
+  agentName  AgentName? // which RT AI Workforce agent produced this entry, if actorType = AGENT
+  traceId    String? // correlation id shared by every agent invocation within one RT Command run
   action     String // e.g. "match.proposed", "match.confirmed", "contact.revealed", "dispatcher.override"
   entityType String // e.g. "Match", "Trip", "TripRequest"
   entityId   String
@@ -287,6 +536,7 @@ model AuditLogEntry {
 
   @@index([entityType, entityId])
   @@index([createdAt])
+  @@index([traceId])
 }
 
 model DispatcherUser {

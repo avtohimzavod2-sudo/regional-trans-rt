@@ -1,3 +1,4 @@
+import type { PaymentMode } from "@prisma/client";
 import { db } from "@/lib/db";
 import { logAction } from "@/lib/audit";
 import { findCandidateOffers, findCandidateRequests } from "./engine";
@@ -6,6 +7,10 @@ import { confirmDeclineKeyboard, sendTelegramMessage } from "@/lib/messaging/tel
 import { sendWhatsAppConfirmButtons, sendWhatsAppText } from "@/lib/messaging/whatsapp";
 import { messages, type Lang } from "@/lib/i18n/messages";
 import type { MatchableOffer, MatchableRequest } from "./types";
+import { rootContext } from "@/lib/agents/trace";
+import { assertSafeToReveal } from "@/lib/agents/trust";
+import { chargeCommissionForTrip, CommissionAlreadyChargedError } from "@/lib/agents/pay";
+import { openSupportCase } from "@/lib/agents/support";
 
 const ACTIVE_MATCH_STATUSES = ["PROPOSED_TO_DRIVER", "AWAITING_DRIVER", "AWAITING_PASSENGER"] as const;
 
@@ -255,6 +260,26 @@ export async function handlePassengerResponse(matchId: string, accepted: boolean
 }
 
 async function revealContacts(matchId: string, tripId: string) {
+  const ctx = rootContext();
+  const safety = await assertSafeToReveal(ctx, matchId);
+  if (!safety.allowed) {
+    await openSupportCase(ctx, {
+      tripId,
+      caseType: "OTHER",
+      openedByType: "AGENT",
+      openedById: "TRUST",
+      description: `Contact reveal blocked: ${safety.reason}`,
+    });
+    await logAction({
+      actorType: "AGENT",
+      action: "contact.reveal_blocked",
+      entityType: "Trip",
+      entityId: tripId,
+      details: { matchId, reason: safety.reason },
+    });
+    return;
+  }
+
   const match = await db.match.findUniqueOrThrow({
     where: { id: matchId },
     include: {
@@ -290,13 +315,30 @@ async function revealContacts(matchId: string, tripId: string) {
   await logAction({ actorType: "AGENT", action: "contact.revealed", entityType: "Trip", entityId: tripId, details: { matchId } });
 }
 
-export async function completeTrip(tripId: string) {
+// Default payment mode when the dispatcher/driver flow hasn't specified one:
+// the driver collects the fare in person and RT simply debits the driver's
+// RT Balance for its 100-som-per-seat commission. This is the simplest,
+// safest default — no cash ever passes through RT — and can be overridden
+// per-trip by passing an explicit `payment` param once a THROUGH_RT flow exists.
+const DEFAULT_PAYMENT_MODE: PaymentMode = "DRIVER_DIRECT_RT_BALANCE";
+
+export async function completeTrip(tripId: string, payment?: { mode?: PaymentMode; totalFareSom?: number }) {
   const trip = await db.trip.findUniqueOrThrow({
     where: { id: tripId },
     include: { driverOffer: { include: { origin: true, destination: true } } },
   });
 
   await db.trip.update({ where: { id: tripId }, data: { status: "COMPLETED", completedAt: new Date() } });
+
+  const ctx = rootContext();
+  try {
+    await chargeCommissionForTrip(ctx, tripId, {
+      mode: payment?.mode ?? DEFAULT_PAYMENT_MODE,
+      totalFareSom: payment?.totalFareSom,
+    });
+  } catch (err) {
+    if (!(err instanceof CommissionAlreadyChargedError)) throw err;
+  }
 
   const returnOffer = await db.driverOffer.create({
     data: buildReturnLegOfferInput({
