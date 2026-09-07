@@ -44,6 +44,36 @@ async function main() {
   console.log(`Seeded corridor "${corridor.nameRu}" with ${PILOT_STOPS.length} stops.`);
   console.log(`Dispatcher user ready: ${adminUsername} (password from SEED_DISPATCHER_PASSWORD or default "changeme123" — change it).`);
 
+  // SAPARGUL — head treasurer account + a SANDBOX PaymentDestination so the
+  // cargo Payment Gate has something to issue in dev/test without ever
+  // touching real banking (AGENTS Sapargul spec s.8/s.27). Never seeds a
+  // PRODUCTION destination — that must be configured by an admin with real,
+  // approved requisites.
+  const treasurerUsername = process.env.SEED_TREASURER_USERNAME ?? "treasurer";
+  const treasurerPassword = process.env.SEED_TREASURER_PASSWORD ?? "changeme123";
+  await db.dispatcherUser.upsert({
+    where: { username: treasurerUsername },
+    update: {},
+    create: { username: treasurerUsername, passwordHash: hashPassword(treasurerPassword), role: "treasurer" },
+  });
+  console.log(`Treasurer dispatcher user ready: ${treasurerUsername} (password from SEED_TREASURER_PASSWORD or default "changeme123" — change it).`);
+
+  const sandboxDestinationLabel = "RT Cargo — Sandbox";
+  const existingSandboxDestination = await db.paymentDestination.findFirst({ where: { label: sandboxDestinationLabel, environment: "SANDBOX" } });
+  if (!existingSandboxDestination) {
+    await db.paymentDestination.create({
+      data: {
+        label: sandboxDestinationLabel,
+        environment: "SANDBOX",
+        method: "bank_transfer",
+        accountReference: "SANDBOX-0000-TEST",
+        instructionsText: "Тестовые реквизиты RT Cargo (песочница) — не для реальных платежей.",
+        isActive: true,
+      },
+    });
+    console.log(`Seeded sandbox PaymentDestination "${sandboxDestinationLabel}".`);
+  }
+
   // MIRA KYRGYZ TRAINING — synthetic-only seed data. Idempotent: benchmark
   // cases upsert by their unique `code`; training examples are skipped if
   // an entry with the same `input` already exists. Never seeds real user

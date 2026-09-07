@@ -18,11 +18,13 @@ import { NETWORK_AGENT_CONTRACT } from "./network";
 import { MIRA_AGENT_CONTRACT } from "@/lib/mira/orchestrator";
 import { JOLCHU_AGENT_CONTRACT } from "@/lib/jolchu/orchestrator";
 import { SAPAR_AGENT_CONTRACT } from "@/lib/sapar/orchestrator";
+import { SAPARGUL_AGENT_CONTRACT } from "@/lib/sapargul/orchestrator";
 
 export const AGENT_REGISTRY: AgentContract[] = [
   MIRA_AGENT_CONTRACT,
   JOLCHU_AGENT_CONTRACT,
   SAPAR_AGENT_CONTRACT,
+  SAPARGUL_AGENT_CONTRACT,
   COMMAND_AGENT_CONTRACT,
   PASSENGER_AGENT_CONTRACT,
   DRIVER_AGENT_CONTRACT,

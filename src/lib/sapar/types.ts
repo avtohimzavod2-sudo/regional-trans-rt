@@ -105,6 +105,19 @@ export interface SaparResult {
   } | null;
   assignedExecutorName: string | null;
   incidentOpened: boolean;
+  // Present only right after a customer confirms a priced quote — the
+  // Payment Gate's outbound face for Mira (AGENTS Sapargul spec s.9/s.16).
+  // null means either no payment step applies yet, or a destination/price
+  // isn't available (an incident is opened in that case; never fabricated).
+  paymentInstructions: {
+    orderReference: string;
+    amountSom: number;
+    currency: string;
+    destinationLabel: string | null;
+    destinationMethod: string | null;
+    instructionsText: string | null;
+    isSandbox: boolean;
+  } | null;
 }
 
 /** What a candidate executor must be able to handle for a given shipment —

@@ -128,6 +128,54 @@ function rejectedAllCancelledReply(language: Language): string {
   return templates[language] ?? templates.RU;
 }
 
+/** The reply right after a customer confirms a priced quote — the shipment
+ * is CONFIRMED but the Payment Gate is not yet open (AGENTS Sapargul spec
+ * s.9/s.24). Never claims money arrived, never invents requisites: if
+ * paymentInstructions is null (no destination configured yet, or pricing
+ * still pending), the reply says so honestly instead of fabricating a QR. */
+function paymentRequiredReply(result: SaparResult, language: Language): string {
+  const acceptedTemplates: Record<Language, string> = {
+    KY: `Жүк №${result.publicId} боюнча жеткирүү варианты бекитилди.`,
+    RU: `Вариант доставки по заявке №${result.publicId} подтверждён.`,
+    EN: `The delivery option for shipment #${result.publicId} is confirmed.`,
+  };
+  const parts: string[] = [acceptedTemplates[language] ?? acceptedTemplates.RU];
+
+  const p = result.paymentInstructions;
+  if (p) {
+    const dueTemplates: Record<Language, string> = {
+      KY: `Төлөө үчүн: ${p.amountSom} ${p.currency}.`,
+      RU: `К оплате: ${p.amountSom} ${p.currency}.`,
+      EN: `Amount due: ${p.amountSom} ${p.currency}.`,
+    };
+    parts.push(dueTemplates[language] ?? dueTemplates.RU);
+    if (p.isSandbox) {
+      const sandboxTemplates: Record<Language, string> = {
+        KY: "(тест режими)",
+        RU: "(тестовый режим)",
+        EN: "(sandbox mode)",
+      };
+      parts.push(sandboxTemplates[language] ?? sandboxTemplates.RU);
+    }
+    if (p.instructionsText) parts.push(p.instructionsText);
+    const afterPayTemplates: Record<Language, string> = {
+      KY: "Төлөгөндөн кийин түбөртүктү жибере аласыз — келип түшкөнүн текшеребиз.",
+      RU: "После оплаты можете отправить квитанцию — мы сверим поступление.",
+      EN: "After paying, you can send the receipt — we'll verify the payment arrived.",
+    };
+    parts.push(afterPayTemplates[language] ?? afterPayTemplates.RU);
+  } else {
+    const preparingTemplates: Record<Language, string> = {
+      KY: "Төлөм үчүн реквизиттерди даярдап жатабыз, жакында жиберебиз.",
+      RU: "Готовим реквизиты для оплаты, скоро отправим.",
+      EN: "We're preparing payment details and will send them shortly.",
+    };
+    parts.push(preparingTemplates[language] ?? preparingTemplates.RU);
+  }
+
+  return parts.join(" ");
+}
+
 function bookedReply(result: SaparResult, language: Language): string {
   const parts: string[] = [];
   const acceptedTemplates: Record<Language, string> = {
@@ -179,5 +227,10 @@ export function composeSaparReply(result: SaparResult, language: Language): stri
   if (result.status === "NEEDS_INFO") return askMissingFields(result.missingFields, language);
   if (result.risk.action === "ESCALATE") return needsManualReviewReply(language);
   if (result.status === "AWAITING_CONFIRMATION") return offeredReply(result, language);
+  // Confirmed but the Payment Gate hasn't opened yet — never say "booked"
+  // here, that would imply money and execution already happened (AGENTS
+  // Sapargul spec s.24/s.25). Everything from AWAITING_PICKUP onward has
+  // passed the gate (spec s.16/s.43) and keeps the existing booked phrasing.
+  if (result.status === "CONFIRMED") return paymentRequiredReply(result, language);
   return bookedReply(result, language);
 }

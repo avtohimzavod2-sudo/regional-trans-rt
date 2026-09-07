@@ -179,6 +179,7 @@ export async function handleSaparInbound(params: SaparInboundParams): Promise<Sa
       recommendedQuote: null,
       assignedExecutorName: null,
       incidentOpened: risk.action !== "ALLOW",
+      paymentInstructions: null,
     };
   }
 
@@ -268,6 +269,7 @@ export async function handleSaparInbound(params: SaparInboundParams): Promise<Sa
       recommendedQuote: null,
       assignedExecutorName: null,
       incidentOpened: true,
+      paymentInstructions: null,
     };
   }
 
@@ -286,6 +288,7 @@ export async function handleSaparInbound(params: SaparInboundParams): Promise<Sa
       recommendedQuote: null,
       assignedExecutorName: null,
       incidentOpened: false,
+      paymentInstructions: null,
     };
   }
 
@@ -312,6 +315,7 @@ export async function handleSaparInbound(params: SaparInboundParams): Promise<Sa
       recommendedQuote: null,
       assignedExecutorName: null,
       incidentOpened: true,
+      paymentInstructions: null,
     };
   }
 
@@ -358,6 +362,7 @@ export async function handleSaparInbound(params: SaparInboundParams): Promise<Sa
       recommendedQuote: null,
       assignedExecutorName: null,
       incidentOpened: true,
+      paymentInstructions: null,
     };
   }
 
@@ -425,5 +430,6 @@ export async function handleSaparInbound(params: SaparInboundParams): Promise<Sa
     },
     assignedExecutorName: null,
     incidentOpened: false,
+    paymentInstructions: null,
   };
 }

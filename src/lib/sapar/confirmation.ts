@@ -17,6 +17,7 @@ import { emitSapargulEvent } from "./events";
 import { isMockProviderCode } from "./provider";
 import { openShipmentIncident } from "./incidents";
 import type { SaparResult } from "./types";
+import { requestShipmentPayment } from "@/lib/sapargul/payment";
 
 export class ShipmentNotAwaitingConfirmationError extends Error {
   constructor(shipmentId: string, status: ShipmentStatus) {
@@ -141,7 +142,14 @@ interface ResultQuote {
 // BLOCK/ESCALATE shipments can never reach AWAITING_CONFIRMATION (the risk
 // gate runs before matching in handleSaparInbound), so it's always accurate
 // to report LOW/ALLOW from this point in the lifecycle onward.
-function buildResult(shipment: ResultShipment, quote: ResultQuote | null, assignedExecutorName: string | null): SaparResult {
+// Looks up the shipment's current ShipmentPayment (if any) itself rather
+// than threading it through every call site — so every return path
+// (fresh confirmation, idempotent repeat, reject/cancel) reports the same,
+// always-current Payment Gate state without duplicating the query logic.
+async function buildResult(shipment: ResultShipment, quote: ResultQuote | null, assignedExecutorName: string | null): Promise<SaparResult> {
+  const payment = await db.shipmentPayment.findUnique({ where: { shipmentId: shipment.id } });
+  const destination = payment?.destinationId ? await db.paymentDestination.findUnique({ where: { id: payment.destinationId } }) : null;
+
   return {
     shipmentId: shipment.id,
     publicId: shipment.publicId,
@@ -160,6 +168,18 @@ function buildResult(shipment: ResultShipment, quote: ResultQuote | null, assign
       : null,
     assignedExecutorName,
     incidentOpened: false,
+    paymentInstructions:
+      payment && destination
+        ? {
+            orderReference: payment.orderReference,
+            amountSom: payment.amountExpectedSom,
+            currency: payment.currency,
+            destinationLabel: destination.label,
+            destinationMethod: destination.method,
+            instructionsText: destination.instructionsText,
+            isSandbox: destination.environment === "SANDBOX",
+          }
+        : null,
   };
 }
 
@@ -187,7 +207,7 @@ export async function confirmShipmentQuote(ctx: AgentContext, shipmentId: string
   if (gate === "ALREADY_DONE") {
     const quote = shipment.selectedQuoteId ? await db.shipmentQuote.findUnique({ where: { id: shipment.selectedQuoteId } }) : null;
     const assignedExecutor = shipment.assignedExecutorId ? await db.deliveryExecutor.findUnique({ where: { id: shipment.assignedExecutorId } }) : null;
-    return buildResult(shipment, quote, assignedExecutor?.name ?? null);
+    return buildResult(shipment, quote, assignedExecutor?.name ?? null); // idempotent repeat: reports current Payment Gate state, never re-requests
   }
 
   const targetQuoteId = quoteId ?? shipment.selectedQuoteId;
@@ -204,9 +224,6 @@ export async function confirmShipmentQuote(ctx: AgentContext, shipmentId: string
   await db.shipment.update({ where: { id: shipmentId }, data: { selectedQuoteId: quote.id } });
   await transitionShipment(ctx, shipmentId, "CONFIRMED");
   await emitSapargulEvent(ctx, "QUOTE_ACCEPTED", shipmentId, { quoteId: quote.id, priceSom: quote.priceSom, priceSource: quote.priceSource });
-  // Payment Gate integration point (spec s.5, intentionally not built this
-  // stage): a future flow would emit PAYMENT_REQUIRED here and hold at
-  // AWAITING_PAYMENT before booking is allowed to proceed further.
 
   let assignedExecutor: { id: string; name: string } | null = null;
   if (quote.executorId) {
@@ -242,7 +259,21 @@ export async function confirmShipmentQuote(ctx: AgentContext, shipmentId: string
     await emitSapargulEvent(ctx, "COURIER_ASSIGNED", shipmentId, { executorId: assignedExecutor.id, executorName: assignedExecutor.name });
   }
 
-  await transitionShipment(ctx, shipmentId, "AWAITING_PICKUP");
+  // Payment Gate (Sapargul, AGENTS Sapargul spec s.5/s.16/s.43): the
+  // shipment deliberately stays at CONFIRMED — never auto-advanced to
+  // AWAITING_PICKUP here. Only the head treasurer's confirmActualPaymentReceipt
+  // (src/lib/sapargul/treasury.ts) may open the gate and let Sapar continue.
+  if (quote.priceSom != null) {
+    await requestShipmentPayment(ctx, shipmentId, quote.priceSom, quote.currency);
+  } else {
+    await openShipmentIncident(ctx, {
+      shipmentId,
+      type: "payment_amount_not_available",
+      severity: "MEDIUM",
+      description: "Quote confirmed without a priceSom set — cannot request payment until pricing is finalized.",
+      openedByType: "AGENT",
+    });
+  }
 
   await logAgentAction({
     ctx,

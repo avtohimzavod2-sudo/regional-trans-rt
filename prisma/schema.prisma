@@ -103,6 +103,7 @@ enum AgentName {
   MIRA
   JOLCHU
   SAPAR
+  SAPARGUL
 }
 
 enum PaymentMode {
@@ -1257,6 +1258,7 @@ model Shipment {
   legs      ShipmentLeg[]
   quotes    ShipmentQuote[]
   incidents ShipmentIncident[]
+  payment   ShipmentPayment?
 
   @@index([status, createdAt])
   @@index([senderContact])
@@ -1386,4 +1388,121 @@ model ShipmentIncident {
 
   @@index([shipmentId, status])
   @@index([severity, status])
+}
+
+// ============================================================================
+// Сапаргуль — cargo/parcel payment contour (AGENTS spec "Sapargul" stage).
+// ============================================================================
+// THE CRITICAL INVARIANT (spec s.2/s.43): a receipt/screenshot/transaction
+// id is PAYMENT EVIDENCE, never PAYMENT CONFIRMATION. The only writer of
+// status = PAYMENT_CONFIRMED anywhere in this codebase is
+// src/lib/sapargul/treasury.ts's confirmActualPaymentReceipt(), which is
+// gated behind the "treasurer"/"admin" dispatcher role. Sapar and Sapargul's
+// own operational actions can never reach that status directly.
+
+enum ShipmentPaymentStatus {
+  PAYMENT_REQUIRED
+  PAYMENT_INSTRUCTIONS_READY
+  AWAITING_PAYMENT
+  PAYMENT_EVIDENCE_RECEIVED
+  PAYMENT_REVIEW
+  AWAITING_TREASURER_CONFIRMATION
+  PAYMENT_CONFIRMED
+  PAYMENT_MISMATCH
+  PAYMENT_REJECTED
+  REFUND_REQUIRED
+  REFUND_PENDING
+  REFUND_CONFIRMED
+  CANCELLED
+}
+
+enum PaymentEvidenceType {
+  RECEIPT_IMAGE
+  RECEIPT_PDF
+  SCREENSHOT
+  TRANSACTION_REFERENCE
+  TEXT_STATEMENT
+}
+
+enum PaymentPreliminaryCheckStatus {
+  PENDING
+  LIKELY_MATCH
+  MISMATCH
+  NEEDS_REVIEW
+}
+
+enum PaymentTreasuryReviewStatus {
+  PENDING
+  CONFIRMED
+  REJECTED
+}
+
+enum PaymentDestinationEnvironment {
+  SANDBOX
+  PRODUCTION
+}
+
+// Config abstraction so Sapargul never invents QR codes/requisites (spec
+// s.8). In PRODUCTION, with no active destination configured, the system
+// must surface PAYMENT_DESTINATION_NOT_CONFIGURED rather than fabricate one.
+model PaymentDestination {
+  id               String                        @id @default(cuid())
+  label            String // human name, e.g. "RT Cargo — Optima Bank"
+  environment      PaymentDestinationEnvironment @default(SANDBOX)
+  method           String // free text: "bank_transfer" | "qr" | "mbank" | ...
+  accountReference String? // masked/alias only — never full card/account secrets
+  qrPayload        String? // only ever populated by an admin for a real, approved destination
+  instructionsText String? // human-readable instructions template shown to the client
+  isActive         Boolean                       @default(true)
+  createdAt        DateTime                      @default(now())
+  updatedAt        DateTime                      @updatedAt
+
+  payments ShipmentPayment[]
+
+  @@index([environment, isActive])
+}
+
+// Deliberately its own entity, not fields bolted onto Shipment (spec s.7) —
+// Sapar (operational) and Sapargul (financial) contours must stay separable.
+model ShipmentPayment {
+  id             String   @id @default(cuid())
+  shipmentId     String   @unique
+  shipment       Shipment @relation(fields: [shipmentId], references: [id])
+  orderReference String   @unique // customer-facing payment reference for treasury reconciliation
+
+  amountExpectedSom Int
+  currency          String                @default("KGS")
+  status            ShipmentPaymentStatus @default(PAYMENT_REQUIRED)
+
+  destinationId String?
+  destination   PaymentDestination? @relation(fields: [destinationId], references: [id])
+
+  instructionsIssuedAt DateTime?
+
+  evidenceType         PaymentEvidenceType?
+  evidenceReference    String? // opaque reference/text — never raw card/account secrets
+  evidenceReceivedAt   DateTime?
+  claimedAmountSom     Int?
+  claimedCurrency      String?
+  claimedPaymentTime   DateTime?
+  transactionReference String?
+
+  preliminaryCheckStatus PaymentPreliminaryCheckStatus @default(PENDING)
+  preliminaryCheckNotes  String?
+  discrepancyFlags       String[] // e.g. UNDERPAID, OVERPAID, DUPLICATE_REFERENCE, RECIPIENT_MISMATCH — see src/lib/sapargul/types.ts
+
+  treasuryReviewStatus PaymentTreasuryReviewStatus @default(PENDING)
+  treasuryReviewedAt   DateTime?
+  treasuryReviewerId   String? // DispatcherUser.username of the confirming/rejecting treasurer
+  confirmedAmountSom   Int?
+  confirmedAt          DateTime?
+  rejectedAt           DateTime?
+  rejectionReason      String?
+  mismatchReason       String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([transactionReference])
 }
