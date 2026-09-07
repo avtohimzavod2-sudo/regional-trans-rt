@@ -25,6 +25,10 @@ import {
 import { checkSafety, detectInjectionAttempt, safetyRefusalText } from "./safety";
 import { composeFallbackReply, situationForOutcome } from "./reply-templates";
 import { mapQuickRoleToMiraRole } from "./types";
+import { decideJolchuRouting } from "@/lib/jolchu/routing-decision";
+import { resolveRouteIntelligence } from "@/lib/jolchu/orchestrator";
+import type { RouteIntelligenceResult } from "@/lib/jolchu/types";
+import { pickJolchuLocationInputs } from "./jolchu-bridge";
 
 export const MIRA_AGENT_CONTRACT: AgentContract = {
   name: "MIRA",
@@ -132,6 +136,15 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
   const conversation = await getOrCreateActiveConversation(channel, params.senderId);
   const detection = detectMiraLanguage(params.text);
 
+  await logAgentAction({
+    ctx,
+    agent: "MIRA",
+    action: "mira.request_received",
+    entityType: "MiraConversation",
+    entityId: conversation.id,
+    details: { channel: params.channel, language: detection.language, languageConfidence: detection.confidence },
+  });
+
   if (detectInjectionAttempt(params.text)) {
     const refusal = safetyRefusalText(detection.language);
     await appendUserMessage(conversation.id, {
@@ -204,6 +217,53 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
     traceId: ctx.traceId,
   });
 
+  await logAgentAction({
+    ctx,
+    agent: "MIRA",
+    action: "mira.intent_classified",
+    entityType: "MiraConversation",
+    entityId: conversation.id,
+    details: {
+      role: understanding.role,
+      roleConfidence: understanding.roleConfidence,
+      intent: understanding.intent,
+      intentConfidence: understanding.intentConfidence,
+      requiresClarification: understanding.requiresClarification,
+    },
+  });
+
+  const jolchuDecision = decideJolchuRouting(params.text);
+  await logAgentAction({
+    ctx,
+    agent: "MIRA",
+    action: "mira.jolchu_gate",
+    entityType: "MiraConversation",
+    entityId: conversation.id,
+    details: {
+      required: jolchuDecision.required,
+      reasonCode: jolchuDecision.reasonCode,
+      matchedSignal: jolchuDecision.matchedSignal,
+    },
+  });
+
+  let jolchuResult: RouteIntelligenceResult | null = null;
+  if (jolchuDecision.required && jolchuDecision.reasonCode) {
+    const jolchuInputs = pickJolchuLocationInputs(params.text, understanding.entities);
+    try {
+      jolchuResult = await resolveRouteIntelligence({
+        reasonCode: jolchuDecision.reasonCode,
+        origin: jolchuInputs.origin,
+        destination: jolchuInputs.destination,
+        conversationId: conversation.id,
+        ctx,
+      });
+    } catch (err) {
+      // Route intelligence is an enrichment, not a hard dependency — Jolchu
+      // failing must never break Mira's own reply flow.
+      console.error("[mira] jolchu route intelligence call failed", err);
+    }
+  }
+
   const commandResult = await handleInboundMessage({
     channel: params.channel,
     senderId: params.senderId,
@@ -269,7 +329,21 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
     action: OUTCOME_TO_EVENT[commandResult.outcome] ?? "MIRA_CONVERSATION_COMPLETED",
     entityType: "MiraConversation",
     entityId: conversation.id,
-    details: { channel: params.channel, senderId: params.senderId, commandOutcome: commandResult.outcome, sent },
+    details: {
+      channel: params.channel,
+      senderId: params.senderId,
+      commandOutcome: commandResult.outcome,
+      sent,
+      jolchu: jolchuResult
+        ? {
+            requestId: jolchuResult.requestId,
+            reasonCode: jolchuDecision.reasonCode,
+            status: jolchuResult.status,
+            confidence: jolchuResult.confidence,
+            hasRoute: jolchuResult.route !== null,
+          }
+        : null,
+    },
   });
 
   return { conversationId: conversation.id, traceId: ctx.traceId, replyText, sent };

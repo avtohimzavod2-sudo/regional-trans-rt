@@ -8,7 +8,17 @@ export const dynamic = "force-dynamic";
 // dispatcher/ops review only. Never surface agentName outside this UI.
 export default async function MiraTracePage() {
   const entries = await db.auditLogEntry.findMany({
-    where: { OR: [{ agentName: "MIRA" }, { entityType: { in: ["MiraConversation", "MiraMessage", "MiraBenchmarkRun"] } }] },
+    // Jolchu rows are included too: Mira calls Jolchu synchronously through
+    // the routing gate and shares her own traceId with it, so a dispatcher
+    // reviewing one conversation's trace here sees the full
+    // MIRA -> JOLCHU -> MIRA chain, not just Mira's own steps.
+    where: {
+      OR: [
+        { agentName: "MIRA" },
+        { agentName: "JOLCHU" },
+        { entityType: { in: ["MiraConversation", "MiraMessage", "MiraBenchmarkRun"] } },
+      ],
+    },
     orderBy: { createdAt: "desc" },
     take: 100,
   });

@@ -97,6 +97,15 @@ export async function resolveRouteIntelligence(req: RouteIntelligenceRequest): P
   const ctx = req.ctx ?? rootContext();
   const requestId = `jolchu_${nanoid(12)}`;
 
+  await logAgentAction({
+    ctx,
+    agent: "JOLCHU",
+    action: "jolchu.request_started",
+    entityType: "JolchuRequest",
+    entityId: requestId,
+    details: { reasonCode: req.reasonCode, conversationId: req.conversationId ?? null },
+  });
+
   const modelProvider = req.deps?.modelProvider ?? getJolchuModelProvider();
   const fallbackModelProvider = req.deps?.fallbackModelProvider ?? getJolchuFallbackModelProvider();
   const routeProvider = req.deps?.routeProvider ?? getJolchuRouteProvider();
