@@ -4,6 +4,12 @@
 // never talks to a specific provider directly — only through this
 // interface — so adding a new carrier type later never requires rewriting
 // the orchestrator or matching engine.
+//
+// Capability-based (hardening spec s.8): a provider that can only quote
+// (no live booking API yet) is still a valid adapter — getQuote/
+// checkAvailability are the only two methods every provider must implement;
+// createBooking/cancelBooking/getTracking are optional and absent entirely
+// on a provider that doesn't support them, rather than throwing at runtime.
 import { nanoid } from "nanoid";
 
 export interface DeliveryQuoteRequest {
@@ -36,44 +42,58 @@ export interface DeliveryProviderAdapter {
   providerCode: string;
   getQuote(input: DeliveryQuoteRequest): Promise<DeliveryQuoteOffer>;
   checkAvailability(input: DeliveryQuoteRequest): Promise<boolean>;
-  createBooking(shipmentPublicId: string, quote: DeliveryQuoteOffer): Promise<BookingResult>;
-  cancelBooking(bookingRef: string): Promise<void>;
-  getTracking(bookingRef: string): Promise<TrackingSnapshot>;
+  createBooking?(shipmentPublicId: string, quote: DeliveryQuoteOffer): Promise<BookingResult>;
+  cancelBooking?(bookingRef: string): Promise<void>;
+  getTracking?(bookingRef: string): Promise<TrackingSnapshot>;
 }
 
-// RT's own deterministic internal tariff/estimator — a valid, honest price
-// source per AGENTS spec s.11 ("RT calculated tariff"), clearly separate
-// from a CONFIRMED external quote. No network call, so it can never hang or
-// fail like a real provider would; used until a real courier/taxi/delivery
-// API is wired in. Tariff numbers here are a placeholder starting point,
-// not RT's actual pricing — flagged in the final report for the owner to
-// confirm/replace.
-const BASE_FARE_SOM = 200;
-const PER_KG_SOM = 25;
-const PER_PIECE_SOM = 80;
-const MIN_FARE_SOM = 250;
-const EXPRESS_MULTIPLIER = 1.5;
-const STANDARD_PICKUP_LEAD_MS = 3 * 60 * 60 * 1000;
-const EXPRESS_PICKUP_LEAD_MS = 1 * 60 * 60 * 1000;
-const STANDARD_DELIVERY_LEAD_MS = 26 * 60 * 60 * 1000;
-const EXPRESS_DELIVERY_LEAD_MS = 6 * 60 * 60 * 1000;
+// ============================================================================
+// SANDBOX-ONLY MOCK PROVIDER — NOT RT'S OFFICIAL TARIFFS.
+// ============================================================================
+// Every constant below is a development placeholder used until a real
+// courier/taxi/delivery provider is wired in. It must never be presented to
+// a client as a confirmed or official RT price — only ever as an estimate
+// (see MOCK_PROVIDER_CODE / isMockProviderCode() below, which callers use to
+// choose "ориентировочная стоимость" phrasing over a firm number). The owner
+// has been explicitly flagged that these numbers need real-tariff review
+// before this provider is ever treated as anything but a sandbox fallback
+// (AGENTS hardening spec s.6/s.7).
+const MOCK_BASE_FARE_SOM = 200;
+const MOCK_PER_KG_SOM = 25;
+const MOCK_PER_PIECE_SOM = 80;
+const MOCK_MIN_FARE_SOM = 250;
+const MOCK_EXPRESS_MULTIPLIER = 1.5;
+const MOCK_STANDARD_PICKUP_LEAD_MS = 3 * 60 * 60 * 1000;
+const MOCK_EXPRESS_PICKUP_LEAD_MS = 1 * 60 * 60 * 1000;
+const MOCK_STANDARD_DELIVERY_LEAD_MS = 26 * 60 * 60 * 1000;
+const MOCK_EXPRESS_DELIVERY_LEAD_MS = 6 * 60 * 60 * 1000;
+
+export const MOCK_PROVIDER_CODE = "internal_mock";
+
+/** Whether a providerCode refers to RT's sandbox estimator rather than a
+ * real, production delivery provider — callers (reply composition, the
+ * dispatcher UI) use this to decide "ориентировочная стоимость" vs a
+ * firmer price phrasing, and must never treat a mock price as confirmed. */
+export function isMockProviderCode(providerCode: string): boolean {
+  return providerCode === MOCK_PROVIDER_CODE;
+}
 
 export class InternalMockDeliveryProvider implements DeliveryProviderAdapter {
-  providerCode = "internal_mock";
+  providerCode = MOCK_PROVIDER_CODE;
 
   async getQuote(input: DeliveryQuoteRequest): Promise<DeliveryQuoteOffer> {
     const isExpress = input.serviceLevel === "EXPRESS";
-    const weightCharge = (input.weightKg ?? 0) * PER_KG_SOM;
-    const pieceCharge = (input.pieces ?? 1) * PER_PIECE_SOM;
-    const rawFare = BASE_FARE_SOM + weightCharge + pieceCharge;
-    const fare = Math.max(MIN_FARE_SOM, isExpress ? rawFare * EXPRESS_MULTIPLIER : rawFare);
+    const weightCharge = (input.weightKg ?? 0) * MOCK_PER_KG_SOM;
+    const pieceCharge = (input.pieces ?? 1) * MOCK_PER_PIECE_SOM;
+    const rawFare = MOCK_BASE_FARE_SOM + weightCharge + pieceCharge;
+    const fare = Math.max(MOCK_MIN_FARE_SOM, isExpress ? rawFare * MOCK_EXPRESS_MULTIPLIER : rawFare);
     const now = Date.now();
 
     return {
       priceSom: Math.round(fare),
       currency: "KGS",
-      estimatedPickupAt: new Date(now + (isExpress ? EXPRESS_PICKUP_LEAD_MS : STANDARD_PICKUP_LEAD_MS)),
-      estimatedDeliveryAt: new Date(now + (isExpress ? EXPRESS_DELIVERY_LEAD_MS : STANDARD_DELIVERY_LEAD_MS)),
+      estimatedPickupAt: new Date(now + (isExpress ? MOCK_EXPRESS_PICKUP_LEAD_MS : MOCK_STANDARD_PICKUP_LEAD_MS)),
+      estimatedDeliveryAt: new Date(now + (isExpress ? MOCK_EXPRESS_DELIVERY_LEAD_MS : MOCK_STANDARD_DELIVERY_LEAD_MS)),
       serviceType: isExpress ? "EXPRESS" : "STANDARD",
       confidence: 0.5, // a flat internal estimate, not a route-aware or executor-confirmed price
     };

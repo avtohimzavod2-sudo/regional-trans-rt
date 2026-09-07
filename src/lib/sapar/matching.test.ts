@@ -8,7 +8,7 @@ function candidate(overrides: Partial<QuoteCandidate>): QuoteCandidate {
     executorId: null,
     executorSource: null,
     executorReliabilityScore: null,
-    executorVerified: false,
+    executorVerification: null,
     priceSom: 500,
     priceSource: "ESTIMATE",
     currency: "KGS",
@@ -35,9 +35,9 @@ describe("rankQuoteCandidates", () => {
       priceSom: 400,
       executorId: "exec-1",
       executorReliabilityScore: 0.95,
-      executorVerified: true,
+      executorVerification: "VERIFIED",
     });
-    const pricier = candidate({ priceSom: 900, executorId: "exec-2", executorReliabilityScore: 0.3 });
+    const pricier = candidate({ priceSom: 900, executorId: "exec-2", executorReliabilityScore: 0.3, executorVerification: "UNVERIFIED" });
 
     const ranked = rankQuoteCandidates([pricier, cheapReliable]);
     expect(ranked[0].executorId).toBe("exec-1");
@@ -73,9 +73,27 @@ describe("rankQuoteCandidates", () => {
     expect(directRanked.rankReasons).toContain("FEWER_HANDOFFS");
   });
 
+  it("never lets an unverified cheaper executor outrank a verified reliable one (AGENTS hardening spec s.11 worked example)", () => {
+    const verified = candidate({
+      priceSom: 700,
+      executorId: "exec-verified",
+      executorReliabilityScore: 0.95,
+      executorVerification: "VERIFIED",
+    });
+    const unverified = candidate({
+      priceSom: 600,
+      executorId: "exec-unverified",
+      executorReliabilityScore: null,
+      executorVerification: "UNVERIFIED",
+    });
+
+    const ranked = rankQuoteCandidates([unverified, verified]);
+    expect(ranked[0].executorId).toBe("exec-verified");
+  });
+
   it("sorts candidates best-first by rankScore", () => {
     const low = candidate({ priceSom: 1000, executorReliabilityScore: 0.1 });
-    const high = candidate({ priceSom: 300, executorReliabilityScore: 0.9, executorVerified: true, doorToDoor: true });
+    const high = candidate({ priceSom: 300, executorReliabilityScore: 0.9, executorVerification: "VERIFIED", doorToDoor: true });
     const ranked = rankQuoteCandidates([low, high]);
     expect(ranked[0].rankScore).toBeGreaterThanOrEqual(ranked[1].rankScore);
   });

@@ -1181,6 +1181,16 @@ enum DeliveryExecutorStatus {
   BLOCKED
 }
 
+// Trust tier — distinct from DeliveryExecutorStatus (active/suspended/etc.).
+// A Telegram/WhatsApp group is a signal source, never an automatically
+// "verified partner" (AGENTS hardening spec s.10): only RT's own vetting
+// moves an executor from UNVERIFIED to PROVISIONAL/VERIFIED.
+enum DeliveryExecutorVerification {
+  VERIFIED
+  PROVISIONAL
+  UNVERIFIED
+}
+
 enum ShipmentIncidentSeverity {
   LOW
   MEDIUM
@@ -1311,7 +1321,7 @@ model ShipmentQuote {
 // partners). partnerId is a loose pointer into RT Network's Partner
 // directory (no FK — that table isn't owned by Sapar).
 model DeliveryExecutor {
-  id                 String                 @id @default(cuid())
+  id                 String                       @id @default(cuid())
   source             DeliveryExecutorSource
   name               String
   phone              String?
@@ -1319,21 +1329,35 @@ model DeliveryExecutor {
   vehicleType        String?
   zones              String[] // free-text city/region names this executor covers
   partnerId          String?
-  status             DeliveryExecutorStatus @default(ACTIVE)
+  status             DeliveryExecutorStatus       @default(ACTIVE)
   reliabilityScore   Float? // null until enough observations exist — see src/lib/sapar/executors.ts
-  totalOrders        Int                    @default(0)
-  completedOrders    Int                    @default(0)
-  cancelledOrders    Int                    @default(0)
-  lateCount          Int                    @default(0)
-  complaintsCount    Int                    @default(0)
-  lostCount          Int                    @default(0)
-  damagedCount       Int                    @default(0)
-  verificationStatus String                 @default("UNVERIFIED") // UNVERIFIED | VERIFIED
-  notes              String?
-  blacklistReason    String?
-  blacklistedAt      DateTime?
-  createdAt          DateTime               @default(now())
-  updatedAt          DateTime               @updatedAt
+  totalOrders        Int                          @default(0)
+  completedOrders    Int                          @default(0)
+  cancelledOrders    Int                          @default(0)
+  lateCount          Int                          @default(0)
+  complaintsCount    Int                          @default(0)
+  lostCount          Int                          @default(0)
+  damagedCount       Int                          @default(0)
+  verificationStatus DeliveryExecutorVerification @default(UNVERIFIED)
+
+  // Capability profile — used to exclude an executor from matching before
+  // ranking ever runs, not just to break ties (AGENTS hardening spec s.9).
+  maxWeightKg                  Float?
+  maxPieces                    Int?
+  acceptsFragile               Boolean @default(true)
+  acceptsPerishable            Boolean @default(false)
+  acceptsTemperatureControlled Boolean @default(false)
+  servicesDoorToDoor           Boolean @default(true)
+  servicesLastMile             Boolean @default(true)
+  servicesIntercity            Boolean @default(true)
+  servicesSameDay              Boolean @default(false)
+  servicesExpress              Boolean @default(false)
+
+  notes           String?
+  blacklistReason String?
+  blacklistedAt   DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
   shipments Shipment[]
   legs      ShipmentLeg[]

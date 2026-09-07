@@ -1,6 +1,8 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { db } from "@/lib/db";
+import { isMockProviderCode } from "@/lib/sapar/provider";
+import { confirmShipmentQuoteAction, rejectShipmentQuoteAction } from "../../../actions";
 
 export const dynamic = "force-dynamic";
 
@@ -47,6 +49,21 @@ export default async function SaparShipmentDetailPage({ params }: { params: Prom
         {shipment.missingFields.length > 0 && (
           <p className="mt-1 text-xs text-amber-400">не хватает: {shipment.missingFields.join(", ")}</p>
         )}
+        {shipment.status === "AWAITING_CONFIRMATION" && (
+          <div className="mt-3 flex items-center gap-2 rounded border border-neutral-800 bg-neutral-900 p-2">
+            <span className="text-xs text-neutral-400">Ожидает подтверждения клиента —</span>
+            <form action={confirmShipmentQuoteAction.bind(null, shipment.id)}>
+              <button type="submit" className="rounded bg-green-900 px-2 py-1 text-xs font-medium text-green-200 hover:bg-green-800">
+                Подтвердить
+              </button>
+            </form>
+            <form action={rejectShipmentQuoteAction.bind(null, shipment.id)}>
+              <button type="submit" className="rounded bg-red-950 px-2 py-1 text-xs font-medium text-red-300 hover:bg-red-900">
+                Отклонить / другой вариант
+              </button>
+            </form>
+          </div>
+        )}
       </div>
 
       <section>
@@ -54,9 +71,15 @@ export default async function SaparShipmentDetailPage({ params }: { params: Prom
         <div className="space-y-1">
           {shipment.quotes.map((q) => (
             <div key={q.id} className="rounded border border-neutral-800 bg-neutral-900 p-2 text-xs text-neutral-300">
-              {q.providerCode} · {q.priceSom != null ? `${q.priceSom} сом` : "цена неизвестна"} ({q.priceSource}) · {q.serviceType} ·
-              статус: {q.status}
-              {q.executor && <> · исполнитель: {q.executor.name}</>}
+              {q.providerCode} · {q.priceSom != null ? `${q.priceSom} сом` : "цена неизвестна"} ({q.priceSource})
+              {isMockProviderCode(q.providerCode) && <span className="ml-1 rounded bg-amber-950 px-1 text-amber-300">SANDBOX</span>} ·{" "}
+              {q.serviceType} · статус: {q.status}
+              {q.executor && (
+                <>
+                  {" "}
+                  · исполнитель: {q.executor.name} ({q.executor.verificationStatus})
+                </>
+              )}
               {q.rankReasons.length > 0 && <> · {q.rankReasons.join(", ")}</>}
             </div>
           ))}

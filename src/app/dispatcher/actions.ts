@@ -14,6 +14,7 @@ import { transitionParcel } from "@/lib/agents/parcel";
 import { resolveSupportCase } from "@/lib/agents/support";
 import { transitionShipment } from "@/lib/sapar/lifecycle";
 import { resolveShipmentIncident } from "@/lib/sapar/incidents";
+import { confirmShipmentQuote, rejectShipmentQuote } from "@/lib/sapar/confirmation";
 
 async function currentDispatcher() {
   const token = (await cookies()).get(SESSION_COOKIE_NAME)?.value;
@@ -211,10 +212,20 @@ export async function resolveSupportCaseAction(caseId: string, formData: FormDat
 
 // --- Sapar (cargo/parcel delivery) ---
 
+// Statuses that must never be reached through the raw status override below
+// — CONFIRMED is only ever valid via confirmShipmentQuoteAction, which also
+// creates the ShipmentLeg and assigns the executor. A generic status flip
+// here would silently skip that (AGENTS hardening spec s.3/s.19/s.32: the
+// Confirmation Gate's side effects must never be bypassable from the UI).
+const SHIPMENT_TRANSITION_ACTION_FORBIDDEN_TARGETS: ShipmentStatus[] = ["CONFIRMED"];
+
 export async function shipmentTransitionAction(shipmentId: string, formData: FormData) {
   const dispatcher = await currentDispatcher();
   const to = String(formData.get("status") ?? "") as ShipmentStatus;
   if (!to) throw new Error("target status is required");
+  if (SHIPMENT_TRANSITION_ACTION_FORBIDDEN_TARGETS.includes(to)) {
+    throw new Error(`Use the dedicated confirm action to move a shipment to ${to} — a raw status override would skip the Confirmation Gate's leg-creation and executor-assignment steps.`);
+  }
   await transitionShipment(rootContext(), shipmentId, to);
   await logAction({
     actorType: "DISPATCHER",
@@ -223,6 +234,43 @@ export async function shipmentTransitionAction(shipmentId: string, formData: For
     entityType: "Shipment",
     entityId: shipmentId,
     details: { to },
+  });
+  revalidatePath("/dispatcher/sapar");
+  revalidatePath(`/dispatcher/sapar/${shipmentId}`);
+}
+
+// The only dispatcher-facing entry point that may move a shipment out of
+// AWAITING_CONFIRMATION into CONFIRMED — mirrors what a customer's "да"
+// reply triggers via Mira, for cases where the dispatcher is confirming on
+// the customer's behalf (e.g. a phone call). Idempotent: calling it again
+// on an already-confirmed shipment is a safe no-op (see confirmation.ts).
+export async function confirmShipmentQuoteAction(shipmentId: string) {
+  const dispatcher = await currentDispatcher();
+  const result = await confirmShipmentQuote(rootContext(), shipmentId);
+  await logAction({
+    actorType: "DISPATCHER",
+    actorId: dispatcher.username,
+    action: "dispatcher.shipment_confirmed",
+    entityType: "Shipment",
+    entityId: shipmentId,
+    details: { status: result.status },
+  });
+  revalidatePath("/dispatcher/sapar");
+  revalidatePath(`/dispatcher/sapar/${shipmentId}`);
+}
+
+export async function rejectShipmentQuoteAction(shipmentId: string, formData: FormData) {
+  const dispatcher = await currentDispatcher();
+  const reason = String(formData.get("reason") ?? "").trim() || undefined;
+  const requestAlternative = formData.get("requestAlternative") !== "false";
+  const result = await rejectShipmentQuote(rootContext(), shipmentId, { reason, requestAlternative });
+  await logAction({
+    actorType: "DISPATCHER",
+    actorId: dispatcher.username,
+    action: "dispatcher.shipment_rejected",
+    entityType: "Shipment",
+    entityId: shipmentId,
+    details: { status: result.status, reason, requestAlternative },
   });
   revalidatePath("/dispatcher/sapar");
   revalidatePath(`/dispatcher/sapar/${shipmentId}`);

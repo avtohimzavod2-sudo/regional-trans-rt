@@ -58,25 +58,89 @@ function needsManualReviewReply(language: Language): string {
   return templates[language] ?? templates.RU;
 }
 
-function confirmedReply(result: SaparResult, language: Language): string {
-  const priceLabel: Record<Language, string> = { KY: "болжолдуу баасы", RU: "ориентировочная цена", EN: "estimated price" };
-  const pickupLabel: Record<Language, string> = { KY: "алуу убактысы", RU: "время забора", EN: "pickup time" };
+// Price-label phrasing shared by the "here's an option" and "it's booked"
+// replies — mock/sandbox prices must never read as a firm, official quote
+// to the client (AGENTS hardening spec s.7/s.15).
+function priceLine(result: SaparResult, language: Language): string | null {
   const price = result.recommendedQuote?.priceSom != null ? `${result.recommendedQuote.priceSom} сом` : null;
+  if (!price) return null;
+  const isMock = result.recommendedQuote?.isMockPricing === true;
   const isEstimate = result.recommendedQuote?.priceSource === "ESTIMATE";
+  const label: Record<Language, string> = isMock
+    ? { KY: "болжолдуу баасы (тест режими)", RU: "предварительная цена (тестовый расчёт)", EN: "estimated price (sandbox)" }
+    : isEstimate
+      ? { KY: "болжолдуу баасы", RU: "ориентировочная цена", EN: "estimated price" }
+      : { KY: "баасы", RU: "цена", EN: "price" };
+  return `${label[language] ?? label.RU}: ~${price}.`;
+}
 
+/** The "found a matching option, awaiting your confirmation" reply — this is
+ * a recommendation, not a booking (spec s.3/s.32). Must always carry the
+ * explicit confirm/reject actions so the client (and Mira) never treats
+ * ranking as finalization. */
+function offeredReply(result: SaparResult, language: Language): string {
+  const pickupLabel: Record<Language, string> = { KY: "алуу убактысы", RU: "время забора", EN: "pickup time" };
+
+  const introTemplates: Record<Language, string> = {
+    KY: `Жүк №${result.publicId} үчүн вариант таптык.`,
+    RU: `Нашли вариант доставки для заявки №${result.publicId}.`,
+    EN: `Found a delivery option for shipment #${result.publicId}.`,
+  };
+  const parts: string[] = [introTemplates[language] ?? introTemplates.RU];
+
+  const price = priceLine(result, language);
+  if (price) parts.push(price);
+  if (result.recommendedQuote?.estimatedPickupAt) {
+    const label = pickupLabel[language] ?? pickupLabel.RU;
+    parts.push(`${label}: ${result.recommendedQuote.estimatedPickupAt.toLocaleString("ru-RU")}.`);
+  }
+
+  const askTemplates: Record<Language, string> = {
+    KY: "Ушул вариантты бекитебизби? [Ооба, макул] же [Башка вариант]",
+    RU: "Подтверждаете этот вариант? [Подтвердить] или [Найти другой вариант]",
+    EN: "Confirm this option? [Confirm] or [Find another option]",
+  };
+  parts.push(askTemplates[language] ?? askTemplates.RU);
+
+  return parts.join(" ");
+}
+
+/** No compatible/available executor was found for this route (spec s.24) —
+ * a structured outcome, not an invented promise of continued autonomous
+ * search. */
+function noExecutorReply(language: Language): string {
+  const templates: Record<Language, string> = {
+    KY: "Азырынча бул багыт үчүн ылайыктуу аткаруучу таппадык. Диспетчерге өткөрдүк, өзүнчө байланышабыз.",
+    RU: "Пока не нашли подходящего исполнителя для этого маршрута. Передали диспетчеру — свяжемся отдельно.",
+    EN: "We couldn't find a suitable courier for this route right now. We've flagged it to a dispatcher and will follow up.",
+  };
+  return templates[language] ?? templates.RU;
+}
+
+/** Cancelled because the customer rejected every offered option (spec s.4's
+ * rejection path), as opposed to a risk-gate cancellation. */
+function rejectedAllCancelledReply(language: Language): string {
+  const templates: Record<Language, string> = {
+    KY: "Жарайт, бул арызды жокко чыгарабыз. Кайра керек болсо, жазыңыз.",
+    RU: "Хорошо, отменяем эту заявку. Если понадобится снова — напишите нам.",
+    EN: "Understood, cancelling this request. Feel free to reach out again if you need it.",
+  };
+  return templates[language] ?? templates.RU;
+}
+
+function bookedReply(result: SaparResult, language: Language): string {
   const parts: string[] = [];
   const acceptedTemplates: Record<Language, string> = {
-    KY: `Жүк №${result.publicId} кабыл алынды.`,
-    RU: `Заявка №${result.publicId} принята.`,
-    EN: `Shipment #${result.publicId} accepted.`,
+    KY: `Жүк №${result.publicId} бекитилди.`,
+    RU: `Заявка №${result.publicId} подтверждена.`,
+    EN: `Shipment #${result.publicId} confirmed.`,
   };
   parts.push(acceptedTemplates[language] ?? acceptedTemplates.RU);
 
-  if (price) {
-    const label = priceLabel[language] ?? priceLabel.RU;
-    parts.push(isEstimate ? `${label}: ~${price}.` : `${label}: ${price}.`);
-  }
+  const price = priceLine(result, language);
+  if (price) parts.push(price);
   if (result.recommendedQuote?.estimatedPickupAt) {
+    const pickupLabel: Record<Language, string> = { KY: "алуу убактысы", RU: "время забора", EN: "pickup time" };
     const label = pickupLabel[language] ?? pickupLabel.RU;
     parts.push(`${label}: ${result.recommendedQuote.estimatedPickupAt.toLocaleString("ru-RU")}.`);
   }
@@ -104,8 +168,16 @@ function confirmedReply(result: SaparResult, language: Language): string {
  * sent when no AI paraphrase is layered on top, or as the safety fallback
  * if one is added later. */
 export function composeSaparReply(result: SaparResult, language: Language): string {
-  if (result.status === "CANCELLED") return cancelledReply(result.risk.reason, language);
+  if (result.status === "CANCELLED") {
+    // A risk-gate cancellation always carries a reason; a customer rejecting
+    // every offered option does not (confirmation.ts's buildResult always
+    // reports risk.reason: null) — that distinction picks the right template
+    // without needing a separate field on SaparResult.
+    return result.risk.reason ? cancelledReply(result.risk.reason, language) : rejectedAllCancelledReply(language);
+  }
+  if (result.status === "FAILED") return noExecutorReply(language);
   if (result.status === "NEEDS_INFO") return askMissingFields(result.missingFields, language);
   if (result.risk.action === "ESCALATE") return needsManualReviewReply(language);
-  return confirmedReply(result, language);
+  if (result.status === "AWAITING_CONFIRMATION") return offeredReply(result, language);
+  return bookedReply(result, language);
 }

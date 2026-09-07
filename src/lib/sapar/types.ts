@@ -3,6 +3,7 @@
 // that module: the shared vocabulary every other Sapar file imports from.
 import type {
   DeliveryExecutorSource,
+  DeliveryExecutorVerification,
   Language,
   ShipmentIncidentSeverity,
   ShipmentLegKind,
@@ -54,6 +55,8 @@ export const QUOTE_RANK_REASONS = [
   "DOOR_TO_DOOR",
   "FEWER_HANDOFFS",
   "VERIFIED_PARTNER",
+  "PROVISIONAL_PARTNER",
+  "UNVERIFIED_PENALTY",
   "NEW_EXECUTOR_UNCERTAIN",
 ] as const;
 export type QuoteRankReason = (typeof QUOTE_RANK_REASONS)[number];
@@ -65,7 +68,10 @@ export interface QuoteCandidate {
   executorId: string | null;
   executorSource: DeliveryExecutorSource | null;
   executorReliabilityScore: number | null; // null = no observations yet (new executor), not "bad"
-  executorVerified: boolean;
+  // null only for the no-executor-bound internal estimate candidate; a real
+  // bound executor always carries its trust tier so ranking can never let an
+  // UNVERIFIED executor win purely on price (AGENTS hardening spec s.10/s.11).
+  executorVerification: DeliveryExecutorVerification | null;
   priceSom: number | null;
   priceSource: ShipmentQuoteSource;
   currency: "KGS";
@@ -92,9 +98,24 @@ export interface SaparResult {
     priceSource: ShipmentQuoteSource;
     estimatedPickupAt: Date | null;
     estimatedDeliveryAt: Date | null;
+    // Whether this price came from the sandbox mock provider rather than a
+    // real/confirmed source — the reply composer must never phrase a mock
+    // price as a firm, official quote (AGENTS hardening spec s.7).
+    isMockPricing: boolean;
   } | null;
   assignedExecutorName: string | null;
   incidentOpened: boolean;
+}
+
+/** What a candidate executor must be able to handle for a given shipment —
+ * used to exclude incompatible executors before ranking even runs (AGENTS
+ * hardening spec s.9). */
+export interface ShipmentCargoRequirements {
+  weightKg: number | null;
+  pieces: number | null;
+  fragile: boolean;
+  perishable: boolean;
+  temperatureControlled: boolean;
 }
 
 export interface ShipmentIncidentInput {

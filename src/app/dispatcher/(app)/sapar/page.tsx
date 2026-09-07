@@ -2,7 +2,7 @@ import Link from "next/link";
 import { db } from "@/lib/db";
 import type { ShipmentStatus } from "@prisma/client";
 import { canTransitionShipment } from "@/lib/sapar/lifecycle";
-import { shipmentTransitionAction } from "../../actions";
+import { confirmShipmentQuoteAction, rejectShipmentQuoteAction, shipmentTransitionAction } from "../../actions";
 
 export const dynamic = "force-dynamic";
 
@@ -72,7 +72,12 @@ export default async function SaparPage() {
 
       <div className="space-y-2">
         {shipments.map((s) => {
-          const nextStatuses = ALL_STATUSES.filter((to) => canTransitionShipment(s.status, to));
+          // CONFIRMED is excluded here on purpose: it may only be reached via
+          // the dedicated Confirm button below, which also creates the leg
+          // and assigns the executor (AGENTS hardening spec s.3/s.19/s.32 —
+          // the Confirmation Gate must never be bypassable from this dropdown).
+          const nextStatuses = ALL_STATUSES.filter((to) => to !== "CONFIRMED" && canTransitionShipment(s.status, to));
+          const awaitingConfirmation = s.status === "AWAITING_CONFIRMATION";
           return (
             <div key={s.id} className="rounded border border-neutral-800 bg-neutral-900 p-3 text-sm">
               <div className="flex items-center justify-between">
@@ -90,6 +95,20 @@ export default async function SaparPage() {
                 {s.channel} · {s.senderContact} · {s.createdAt.toLocaleString("ru-RU")}
                 {s.riskReason && <> · риск: {s.riskReason}</>}
               </div>
+              {awaitingConfirmation && (
+                <div className="mt-2 flex items-center gap-2">
+                  <form action={confirmShipmentQuoteAction.bind(null, s.id)}>
+                    <button type="submit" className="rounded bg-green-900 px-2 py-1 text-xs font-medium text-green-200 hover:bg-green-800">
+                      Подтвердить
+                    </button>
+                  </form>
+                  <form action={rejectShipmentQuoteAction.bind(null, s.id)}>
+                    <button type="submit" className="rounded bg-red-950 px-2 py-1 text-xs font-medium text-red-300 hover:bg-red-900">
+                      Отклонить / другой вариант
+                    </button>
+                  </form>
+                </div>
+              )}
               {nextStatuses.length > 0 && (
                 <form action={shipmentTransitionAction.bind(null, s.id)} className="mt-2 flex items-center gap-2">
                   <select name="status" className="rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-xs">

@@ -56,4 +56,11 @@ describe("canTransitionShipment", () => {
     expect(canTransitionShipment("DELIVERED", "IN_TRANSIT")).toBe(false);
     expect(canTransitionShipment("DELIVERED", "DISPUTED")).toBe(true);
   });
+
+  it("never allows ranking/quoting states to skip straight past the Confirmation Gate (AGENTS hardening spec s.3/s.32: recommendation != booking)", () => {
+    expect(canTransitionShipment("QUOTED", "CONFIRMED")).toBe(false);
+    expect(canTransitionShipment("QUOTED", "AWAITING_PICKUP")).toBe(false);
+    expect(canTransitionShipment("SEARCHING", "CONFIRMED")).toBe(false);
+    expect(canTransitionShipment("AWAITING_CONFIRMATION", "AWAITING_PICKUP")).toBe(false);
+  });
 });

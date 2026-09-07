@@ -22,11 +22,17 @@ import { extractShipmentFields } from "./extract";
 import { evaluateShipmentRisk } from "./risk";
 import { rankQuoteCandidates } from "./matching";
 import { computeReliabilityScore, findCandidateExecutors } from "./executors";
-import { getSaparDeliveryProvider } from "./provider";
+import { getSaparDeliveryProvider, isMockProviderCode } from "./provider";
 import { canTransitionShipment, transitionShipment } from "./lifecycle";
 import { openShipmentIncident } from "./incidents";
 import { emitSapargulEvent } from "./events";
-import { REQUIRED_SHIPMENT_FIELDS, type QuoteCandidate, type RequiredShipmentField, type SaparResult } from "./types";
+import {
+  REQUIRED_SHIPMENT_FIELDS,
+  type QuoteCandidate,
+  type RequiredShipmentField,
+  type SaparResult,
+  type ShipmentCargoRequirements,
+} from "./types";
 
 export const SAPAR_AGENT_CONTRACT: AgentContract = {
   name: "SAPAR",
@@ -40,6 +46,7 @@ export const SAPAR_AGENT_CONTRACT: AgentContract = {
     "never move or confirm money — that is Sapargul's job",
     "never auto-proceed past an ELEVATED or BLOCKED risk decision without a human",
     "never make a real external booking — only the internal mock provider is wired in this stage",
+    "never transition a Shipment to CONFIRMED without an explicit, separate customer confirmation action (confirmShipmentQuote) — finding/ranking/proposing the best option is never the same as booking it",
   ],
   kpi: ["% of requests resolved without an unnecessary clarification question", "risk-gate false-negative rate (target: 0 for BLOCK-tier cargo)", "time to first quote"],
   escalationRules: [
@@ -95,6 +102,7 @@ async function buildQuoteCandidates(params: {
   doorToDoor: boolean;
   pickupText: string;
   destinationText: string;
+  requirements: ShipmentCargoRequirements;
 }): Promise<{ candidates: QuoteCandidate[]; executorsById: Map<string, DeliveryExecutor> }> {
   const provider = getSaparDeliveryProvider();
   const offer = await provider.getQuote({
@@ -109,7 +117,7 @@ async function buildQuoteCandidates(params: {
     executorId: null,
     executorSource: null,
     executorReliabilityScore: null,
-    executorVerified: false,
+    executorVerification: null,
     priceSom: offer.priceSom,
     priceSource: "ESTIMATE",
     currency: "KGS",
@@ -124,7 +132,7 @@ async function buildQuoteCandidates(params: {
     legKinds: ["PICKUP", "INTERCITY", "LAST_MILE"],
   };
 
-  const candidateExecutors = await findCandidateExecutors(params.pickupText, params.destinationText);
+  const candidateExecutors = await findCandidateExecutors(params.pickupText, params.destinationText, params.requirements);
   const executorsById = new Map(candidateExecutors.map((e) => [e.id, e]));
 
   const executorCandidates: QuoteCandidate[] = candidateExecutors.slice(0, 3).map((executor) => ({
@@ -132,7 +140,7 @@ async function buildQuoteCandidates(params: {
     executorId: executor.id,
     executorSource: executor.source,
     executorReliabilityScore: computeReliabilityScore(executor),
-    executorVerified: executor.verificationStatus === "VERIFIED",
+    executorVerification: executor.verificationStatus,
     legKinds: ["PICKUP", "LAST_MILE"],
   }));
 
@@ -307,19 +315,62 @@ export async function handleSaparInbound(params: SaparInboundParams): Promise<Sa
     };
   }
 
-  // --- LOW risk, all required fields known: run the full auto-MVP path. ---
+  // --- LOW risk, all required fields known: search and rank, but STOP at
+  // the customer confirmation gate. Finding/ranking the best option is never
+  // the same as booking it (AGENTS hardening spec s.3/s.4/s.32) — no
+  // ShipmentLeg is created and no executor is assigned here; that only
+  // happens inside confirmShipmentQuote(), triggered by an explicit,
+  // separate customer confirmation action. ---
   await transitionShipment(ctx, shipment.id, "SEARCHING");
 
-  const { candidates, executorsById } = await buildQuoteCandidates({
+  const requirements: ShipmentCargoRequirements = {
+    weightKg: shipment.weightKg,
+    pieces: shipment.pieces,
+    fragile: shipment.fragile,
+    perishable: shipment.perishable,
+    temperatureControlled: shipment.temperatureControlled,
+  };
+
+  const provider = getSaparDeliveryProvider();
+  const available = await provider.checkAvailability({
+    weightKg: shipment.weightKg,
+    pieces: shipment.pieces,
+    serviceLevel: shipment.serviceLevel,
+    doorToDoor: shipment.doorToDoor,
+  });
+
+  if (!available) {
+    await transitionShipment(ctx, shipment.id, "FAILED", { cancelReason: "no_executor_available" });
+    await openShipmentIncident(ctx, {
+      shipmentId: shipment.id,
+      type: "no_executor_available",
+      severity: "MEDIUM",
+      description: "Ни один провайдер/исполнитель не подтвердил доступность для этого направления.",
+      openedByType: "AGENT",
+    });
+    return {
+      shipmentId: shipment.id,
+      publicId: shipment.publicId,
+      status: "FAILED",
+      language: params.language,
+      missingFields: [],
+      risk: { level: "LOW", action: "ALLOW", flags: mergedRiskFlags, reason: null },
+      recommendedQuote: null,
+      assignedExecutorName: null,
+      incidentOpened: true,
+    };
+  }
+
+  const { candidates } = await buildQuoteCandidates({
     weightKg: shipment.weightKg,
     pieces: shipment.pieces,
     serviceLevel: shipment.serviceLevel,
     doorToDoor: shipment.doorToDoor,
     pickupText: shipment.pickupText,
     destinationText: shipment.destinationText,
+    requirements,
   });
   const ranked = rankQuoteCandidates(candidates);
-  const recommended = ranked[0];
 
   const persistedQuotes = await db.$transaction(
     ranked.map((c, i) =>
@@ -346,39 +397,8 @@ export async function handleSaparInbound(params: SaparInboundParams): Promise<Sa
   const recommendedRow = persistedQuotes[0];
 
   await transitionShipment(ctx, shipment.id, "QUOTED");
-  await transitionShipment(ctx, shipment.id, "AWAITING_CONFIRMATION");
-
-  // No payment gate exists yet and nothing external is ever really booked
-  // by the internal mock provider, so auto-accepting the recommended
-  // ESTIMATE here is safe: it only changes Sapar's own internal state, per
-  // AGENTS spec s.12's allowance to "just pick the best" when there's no
-  // multi-turn quote-selection UI yet.
-  await db.shipmentQuote.update({ where: { id: recommendedRow.id }, data: { status: "ACCEPTED" } });
   await db.shipment.update({ where: { id: shipment.id }, data: { selectedQuoteId: recommendedRow.id } });
-  await transitionShipment(ctx, shipment.id, "CONFIRMED");
-  await emitSapargulEvent(ctx, "QUOTE_ACCEPTED", shipment.id, { quoteId: recommendedRow.id, priceSom: recommendedRow.priceSom, priceSource: recommendedRow.priceSource });
-
-  const assignedExecutor = recommended.executorId ? executorsById.get(recommended.executorId) : undefined;
-
-  await db.shipmentLeg.create({
-    data: {
-      shipmentId: shipment.id,
-      sequence: 0,
-      kind: recommended.legKinds[0] ?? "PICKUP",
-      originText: shipment.pickupText,
-      destinationText: shipment.destinationText,
-      executorId: assignedExecutor?.id ?? null,
-      status: assignedExecutor ? "ASSIGNED" : "PLANNED",
-      plannedAt: recommendedRow.estimatedPickupAt,
-    },
-  });
-
-  if (assignedExecutor) {
-    await db.shipment.update({ where: { id: shipment.id }, data: { assignedExecutorId: assignedExecutor.id } });
-    await emitSapargulEvent(ctx, "COURIER_ASSIGNED", shipment.id, { executorId: assignedExecutor.id, executorName: assignedExecutor.name });
-  }
-
-  await transitionShipment(ctx, shipment.id, "AWAITING_PICKUP");
+  await transitionShipment(ctx, shipment.id, "AWAITING_CONFIRMATION");
 
   await logAgentAction({
     ctx,
@@ -386,13 +406,13 @@ export async function handleSaparInbound(params: SaparInboundParams): Promise<Sa
     action: "sapar.request_completed",
     entityType: "Shipment",
     entityId: shipment.id,
-    details: { status: "AWAITING_PICKUP", quoteId: recommendedRow.id, assignedExecutorId: assignedExecutor?.id ?? null },
+    details: { status: "AWAITING_CONFIRMATION", quoteId: recommendedRow.id },
   });
 
   return {
     shipmentId: shipment.id,
     publicId: shipment.publicId,
-    status: "AWAITING_PICKUP",
+    status: "AWAITING_CONFIRMATION",
     language: params.language,
     missingFields: [],
     risk: { level: "LOW", action: "ALLOW", flags: mergedRiskFlags, reason: null },
@@ -401,8 +421,9 @@ export async function handleSaparInbound(params: SaparInboundParams): Promise<Sa
       priceSource: recommendedRow.priceSource,
       estimatedPickupAt: recommendedRow.estimatedPickupAt,
       estimatedDeliveryAt: recommendedRow.estimatedDeliveryAt,
+      isMockPricing: isMockProviderCode(recommendedRow.providerCode),
     },
-    assignedExecutorName: assignedExecutor?.name ?? null,
+    assignedExecutorName: null,
     incidentOpened: false,
   };
 }

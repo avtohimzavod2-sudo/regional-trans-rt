@@ -31,6 +31,7 @@ import type { RouteIntelligenceResult } from "@/lib/jolchu/types";
 import { pickJolchuLocationInputs } from "./jolchu-bridge";
 import { decideSaparRouting } from "@/lib/sapar/routing-decision";
 import { handleSaparInbound } from "@/lib/sapar/orchestrator";
+import { classifyConfirmationReply, confirmShipmentQuote, findShipmentAwaitingConfirmation, rejectShipmentQuote } from "@/lib/sapar/confirmation";
 import { composeSaparReply } from "./sapar-bridge";
 
 export const MIRA_AGENT_CONTRACT: AgentContract = {
@@ -169,6 +170,70 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
     return { conversationId: conversation.id, traceId: ctx.traceId, replyText: refusal, sent };
   }
 
+  // Confirmation-gate short-circuit (AGENTS hardening spec s.3/s.4/s.32): a
+  // shipment sitting at AWAITING_CONFIRMATION expects a yes/no-shaped reply,
+  // not a fresh NLU pass — checked before the Jolchu/Sapar routing gates so
+  // a bare "да"/"жок"/"другой вариант" is never swallowed by
+  // decideSaparRouting's cargo-keyword matching, which wouldn't recognize it
+  // as delivery-related at all.
+  const pendingConfirmation = await findShipmentAwaitingConfirmation(conversation.id);
+  if (pendingConfirmation) {
+    const confirmationIntent = classifyConfirmationReply(params.text);
+    await logAgentAction({
+      ctx,
+      agent: "MIRA",
+      action: "mira.confirmation_gate",
+      entityType: "MiraConversation",
+      entityId: conversation.id,
+      details: { shipmentId: pendingConfirmation.id, intent: confirmationIntent },
+    });
+
+    if (confirmationIntent !== "UNCLEAR") {
+      await appendUserMessage(conversation.id, {
+        rawText: params.text,
+        detectedLanguage: detection.language,
+        languageConfidence: detection.confidence,
+        traceId: ctx.traceId,
+      });
+      const saparResult =
+        confirmationIntent === "CONFIRM"
+          ? await confirmShipmentQuote(ctx, pendingConfirmation.id)
+          : await rejectShipmentQuote(ctx, pendingConfirmation.id, {});
+      const saparReply = composeSaparReply(saparResult, detection.language);
+      const sent = await sendReply(params.channel, params.senderId, saparReply);
+      await appendMiraMessage(conversation.id, saparReply, ctx.traceId);
+      await updateConversationState(conversation.id, {
+        role: "PARCEL_SENDER",
+        detectedLanguage: detection.language,
+        status: saparResult.status === "AWAITING_CONFIRMATION" ? "AWAITING_USER" : "ACTIVE",
+        activeIntent: "cargo_delivery",
+        collectedFields: {},
+        missingFields: saparResult.missingFields,
+        lastAgentDecision: `sapar_${saparResult.status.toLowerCase()}`,
+        lastTraceId: ctx.traceId,
+      });
+      await logAgentAction({
+        ctx,
+        agent: "MIRA",
+        action: "MIRA_SAPAR_CONFIRMATION_HANDLED",
+        entityType: "MiraConversation",
+        entityId: conversation.id,
+        details: {
+          channel: params.channel,
+          senderId: params.senderId,
+          shipmentId: saparResult.shipmentId,
+          intent: confirmationIntent,
+          status: saparResult.status,
+          sent,
+        },
+      });
+      return { conversationId: conversation.id, traceId: ctx.traceId, replyText: saparReply, sent };
+    }
+    // UNCLEAR: fall through to the normal understanding flow below — the
+    // shipment simply stays at AWAITING_CONFIRMATION until a clear reply
+    // arrives, RT Command/Sapar's own clarification handling takes it from here.
+  }
+
   const quick = quickClassifyMessage(params.text);
   const provider = getMiraModelProvider();
   const conversationContext = await recentTranscript(conversation.id);
@@ -302,7 +367,7 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
     await updateConversationState(conversation.id, {
       role: "PARCEL_SENDER",
       detectedLanguage: detection.language,
-      status: saparResult.status === "NEEDS_INFO" ? "AWAITING_USER" : "ACTIVE",
+      status: saparResult.status === "NEEDS_INFO" || saparResult.status === "AWAITING_CONFIRMATION" ? "AWAITING_USER" : "ACTIVE",
       activeIntent: "cargo_delivery",
       collectedFields: understanding.entities,
       missingFields: saparResult.missingFields,
