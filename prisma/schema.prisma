@@ -102,6 +102,7 @@ enum AgentName {
   NETWORK
   MIRA
   JOLCHU
+  SAPAR
 }
 
 enum PaymentMode {
@@ -1025,8 +1026,8 @@ model JolchuLocationAmbiguity {
 }
 
 model JolchuBenchmarkCase {
-  id                     String   @id @default(cuid())
-  code                   String   @unique
+  id                     String          @id @default(cuid())
+  code                   String          @unique
   description            String
   inputType              JolchuInputType
   rawInput               String
@@ -1034,9 +1035,9 @@ model JolchuBenchmarkCase {
   expectedReasonCode     String?
   expectedStatus         String?
   expectedSourceType     String?
-  difficulty             String   @default("MEDIUM")
+  difficulty             String          @default("MEDIUM")
   tags                   String[]
-  createdAt              DateTime @default(now())
+  createdAt              DateTime        @default(now())
 
   results JolchuBenchmarkResult[]
 
@@ -1091,4 +1092,274 @@ model JolchuDataRefreshRun {
   notes            String?
 
   @@index([startedAt])
+}
+
+// ==========================================================================
+// SAPAR — RT AI Workforce cargo/parcel delivery orchestrator (src/lib/sapar).
+// Additive only: does NOT touch the existing Parcel model / PARCEL agent,
+// which stays a separate, narrower flow bound to Corridor/Stop geography and
+// RT's own Driver/Trip records. Sapar's hybrid multi-executor, multi-leg,
+// free-text-geography model (private drivers, RT's own couriers, external
+// delivery services, RT partners) needs its own domain — hence no
+// Stop/Corridor/Driver relations here on purpose. Loose string references
+// (no FK) are used for log-shaped/cross-module pointers (conversationId,
+// partnerId), matching the AuditLogEntry convention already used elsewhere;
+// real parent/child relations are used only where one row structurally owns
+// another (shipment -> legs, shipment -> quotes, shipment -> incidents).
+// ==========================================================================
+
+enum ShipmentStatus {
+  DRAFT
+  NEEDS_INFO
+  READY_FOR_MATCHING
+  SEARCHING
+  QUOTED
+  AWAITING_CONFIRMATION
+  CONFIRMED
+  AWAITING_PICKUP
+  PICKED_UP
+  IN_TRANSIT
+  AT_TRANSFER_POINT
+  OUT_FOR_DELIVERY
+  DELIVERED
+  FAILED
+  CANCELLED
+  DISPUTED
+}
+
+enum ShipmentRiskLevel {
+  LOW
+  ELEVATED
+  BLOCKED
+}
+
+enum ShipmentLegKind {
+  PICKUP
+  INTERCITY
+  LAST_MILE
+  TRANSFER
+  SELF_DROPOFF
+  SELF_PICKUP
+}
+
+enum ShipmentLegStatus {
+  PLANNED
+  ASSIGNED
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum ShipmentQuoteSource {
+  ESTIMATE
+  CONFIRMED
+  MANUAL
+}
+
+enum ShipmentQuoteStatus {
+  OFFERED
+  RECOMMENDED
+  ACCEPTED
+  REJECTED
+  EXPIRED
+}
+
+enum DeliveryExecutorSource {
+  GROUP
+  DIRECT_RT_PARTNER
+  RT_COURIER
+  EXTERNAL_DELIVERY_SERVICE
+  TAXI_PARTNER
+  OTHER
+}
+
+enum DeliveryExecutorStatus {
+  ACTIVE
+  LIMITED
+  SUSPENDED
+  BLOCKED
+}
+
+enum ShipmentIncidentSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum ShipmentIncidentStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  ESCALATED
+}
+
+// A single delivery request end to end: Sapar's normalized order. Free-text
+// geography by design — no Stop/Corridor dependency, so Sapar is never
+// hardcoded to the pilot corridor and can expand beyond Kyrgyzstan later.
+model Shipment {
+  id             String   @id @default(cuid())
+  publicId       String   @unique // short customer-facing reference, e.g. "SPR-4F92K1A9"
+  conversationId String? // MiraConversation.id, loose ref — Mira owns that table
+  channel        Channel
+  language       Language
+
+  senderContact    String // WhatsApp id / phone / Telegram username of whoever is asking
+  pickupText       String // free-text pickup location, as given by the customer
+  pickupContact    String?
+  destinationText  String // free-text destination
+  recipientContact String?
+
+  cargoDescription      String?
+  pieces                Int?
+  weightKg              Float?
+  dimensions            String? // free text, e.g. "40x30x20"
+  declaredValueSom      Int?
+  fragile               Boolean @default(false)
+  perishable            Boolean @default(false)
+  temperatureControlled Boolean @default(false)
+  specialHandling       String?
+
+  preferredPickupTime String? // free text ("завтра утром") — no route/time-window engine yet
+  deliveryDeadline    DateTime?
+  serviceLevel        String    @default("STANDARD") // STANDARD | EXPRESS
+  doorToDoor          Boolean   @default(true)
+
+  riskLevel  ShipmentRiskLevel @default(LOW)
+  riskFlags  String[]
+  riskReason String?
+
+  status             ShipmentStatus    @default(DRAFT)
+  missingFields      String[] // fields Sapar still needs from the customer
+  selectedQuoteId    String? // ShipmentQuote.id, resolved by the app — see src/lib/sapar
+  assignedExecutorId String?
+  assignedExecutor   DeliveryExecutor? @relation(fields: [assignedExecutorId], references: [id])
+
+  cancelReason String?
+  traceId      String?
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  completedAt DateTime?
+  cancelledAt DateTime?
+
+  legs      ShipmentLeg[]
+  quotes    ShipmentQuote[]
+  incidents ShipmentIncident[]
+
+  @@index([status, createdAt])
+  @@index([senderContact])
+  @@index([conversationId])
+}
+
+model ShipmentLeg {
+  id              String            @id @default(cuid())
+  shipmentId      String
+  shipment        Shipment          @relation(fields: [shipmentId], references: [id])
+  sequence        Int // 0-based order within the shipment's delivery plan
+  kind            ShipmentLegKind
+  originText      String
+  destinationText String
+  executorId      String?
+  executor        DeliveryExecutor? @relation(fields: [executorId], references: [id])
+  status          ShipmentLegStatus @default(PLANNED)
+  plannedAt       DateTime?
+  startedAt       DateTime?
+  completedAt     DateTime?
+  handoffCode     String?
+  handoffNote     String?
+  handoffPhotoUrl String?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  @@index([shipmentId, sequence])
+  @@index([executorId])
+}
+
+// Separate ESTIMATE from CONFIRMED — Sapar must never present a hallucinated
+// price as fact. priceSource records where the number actually came from.
+model ShipmentQuote {
+  id                  String              @id @default(cuid())
+  shipmentId          String
+  shipment            Shipment            @relation(fields: [shipmentId], references: [id])
+  providerCode        String // "internal_mock" today; real provider codes once DeliveryProviderAdapter has live integrations
+  executorId          String?
+  executor            DeliveryExecutor?   @relation(fields: [executorId], references: [id])
+  priceSom            Int?
+  currency            String              @default("KGS")
+  priceSource         ShipmentQuoteSource
+  estimatedPickupAt   DateTime?
+  estimatedDeliveryAt DateTime?
+  serviceType         String
+  doorToDoor          Boolean             @default(true)
+  lastMileIncluded    Boolean             @default(true)
+  confidence          Float?
+  rankScore           Float?
+  rankReasons         String[] // e.g. DIRECT_ROUTE, HIGH_RELIABILITY, LOW_PRICE, FAST_PICKUP, DOOR_TO_DOOR, FEWER_HANDOFFS, VERIFIED_PARTNER
+  restrictions        String?
+  cancellationTerms   String?
+  notes               String?
+  status              ShipmentQuoteStatus @default(OFFERED)
+  createdAt           DateTime            @default(now())
+
+  @@index([shipmentId, status])
+}
+
+// Unified provider/executor directory across all four hybrid-network sources
+// (private group drivers, RT's own couriers, external delivery services, RT
+// partners). partnerId is a loose pointer into RT Network's Partner
+// directory (no FK — that table isn't owned by Sapar).
+model DeliveryExecutor {
+  id                 String                 @id @default(cuid())
+  source             DeliveryExecutorSource
+  name               String
+  phone              String?
+  company            String?
+  vehicleType        String?
+  zones              String[] // free-text city/region names this executor covers
+  partnerId          String?
+  status             DeliveryExecutorStatus @default(ACTIVE)
+  reliabilityScore   Float? // null until enough observations exist — see src/lib/sapar/executors.ts
+  totalOrders        Int                    @default(0)
+  completedOrders    Int                    @default(0)
+  cancelledOrders    Int                    @default(0)
+  lateCount          Int                    @default(0)
+  complaintsCount    Int                    @default(0)
+  lostCount          Int                    @default(0)
+  damagedCount       Int                    @default(0)
+  verificationStatus String                 @default("UNVERIFIED") // UNVERIFIED | VERIFIED
+  notes              String?
+  blacklistReason    String?
+  blacklistedAt      DateTime?
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+
+  shipments Shipment[]
+  legs      ShipmentLeg[]
+  quotes    ShipmentQuote[]
+
+  @@index([status])
+  @@index([source])
+}
+
+model ShipmentIncident {
+  id           String                   @id @default(cuid())
+  shipmentId   String
+  shipment     Shipment                 @relation(fields: [shipmentId], references: [id])
+  legId        String? // ShipmentLeg.id, loose pointer — an incident may span the whole shipment
+  type         String // free-text incident type — see src/lib/sapar/incidents.ts for the known set
+  severity     ShipmentIncidentSeverity
+  status       ShipmentIncidentStatus   @default(OPEN)
+  openedByType ActorType
+  openedById   String?
+  description  String?
+  resolution   String?
+  createdAt    DateTime                 @default(now())
+  updatedAt    DateTime                 @updatedAt
+  resolvedAt   DateTime?
+  escalatedAt  DateTime?
+
+  @@index([shipmentId, status])
+  @@index([severity, status])
 }

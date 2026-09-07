@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { cookies } from "next/headers";
-import type { DriverCategory, LedgerEntryType, ParcelStatus } from "@prisma/client";
+import type { DeliveryExecutorStatus, DriverCategory, LedgerEntryType, ParcelStatus, ShipmentStatus } from "@prisma/client";
 import { db } from "@/lib/db";
 import { logAction } from "@/lib/audit";
 import { verifySessionToken, SESSION_COOKIE_NAME } from "@/lib/auth/session";
@@ -12,6 +12,8 @@ import { reviewScoutCandidate } from "@/lib/agents/scout";
 import { adjustBalance } from "@/lib/agents/pay";
 import { transitionParcel } from "@/lib/agents/parcel";
 import { resolveSupportCase } from "@/lib/agents/support";
+import { transitionShipment } from "@/lib/sapar/lifecycle";
+import { resolveShipmentIncident } from "@/lib/sapar/incidents";
 
 async function currentDispatcher() {
   const token = (await cookies()).get(SESSION_COOKIE_NAME)?.value;
@@ -205,4 +207,65 @@ export async function resolveSupportCaseAction(caseId: string, formData: FormDat
     details: { resolution },
   });
   revalidatePath("/dispatcher/support");
+}
+
+// --- Sapar (cargo/parcel delivery) ---
+
+export async function shipmentTransitionAction(shipmentId: string, formData: FormData) {
+  const dispatcher = await currentDispatcher();
+  const to = String(formData.get("status") ?? "") as ShipmentStatus;
+  if (!to) throw new Error("target status is required");
+  await transitionShipment(rootContext(), shipmentId, to);
+  await logAction({
+    actorType: "DISPATCHER",
+    actorId: dispatcher.username,
+    action: "dispatcher.shipment_status_override",
+    entityType: "Shipment",
+    entityId: shipmentId,
+    details: { to },
+  });
+  revalidatePath("/dispatcher/sapar");
+  revalidatePath(`/dispatcher/sapar/${shipmentId}`);
+}
+
+export async function resolveShipmentIncidentAction(incidentId: string, formData: FormData) {
+  const dispatcher = await currentDispatcher();
+  const resolution = String(formData.get("resolution") ?? "").trim();
+  if (!resolution) throw new Error("a resolution note is required");
+  await resolveShipmentIncident(rootContext(), incidentId, resolution);
+  await logAction({
+    actorType: "DISPATCHER",
+    actorId: dispatcher.username,
+    action: "dispatcher.shipment_incident_resolved",
+    entityType: "ShipmentIncident",
+    entityId: incidentId,
+    details: { resolution },
+  });
+  revalidatePath("/dispatcher/sapar/incidents");
+}
+
+// Blacklist/suspend/reinstate an executor — always with an audit trail note,
+// never a silent status flip (AGENTS spec s.19/s.20).
+export async function setDeliveryExecutorStatusAction(executorId: string, formData: FormData) {
+  const dispatcher = await currentDispatcher();
+  const status = String(formData.get("status") ?? "") as DeliveryExecutorStatus;
+  if (!status) throw new Error("target status is required");
+  const reason = String(formData.get("reason") ?? "").trim() || null;
+  await db.deliveryExecutor.update({
+    where: { id: executorId },
+    data: {
+      status,
+      blacklistReason: status === "SUSPENDED" || status === "BLOCKED" ? reason : null,
+      blacklistedAt: status === "SUSPENDED" || status === "BLOCKED" ? new Date() : null,
+    },
+  });
+  await logAction({
+    actorType: "DISPATCHER",
+    actorId: dispatcher.username,
+    action: "dispatcher.delivery_executor_status_changed",
+    entityType: "DeliveryExecutor",
+    entityId: executorId,
+    details: { status, reason },
+  });
+  revalidatePath("/dispatcher/sapar/executors");
 }

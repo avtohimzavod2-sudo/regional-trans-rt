@@ -29,6 +29,9 @@ import { decideJolchuRouting } from "@/lib/jolchu/routing-decision";
 import { resolveRouteIntelligence } from "@/lib/jolchu/orchestrator";
 import type { RouteIntelligenceResult } from "@/lib/jolchu/types";
 import { pickJolchuLocationInputs } from "./jolchu-bridge";
+import { decideSaparRouting } from "@/lib/sapar/routing-decision";
+import { handleSaparInbound } from "@/lib/sapar/orchestrator";
+import { composeSaparReply } from "./sapar-bridge";
 
 export const MIRA_AGENT_CONTRACT: AgentContract = {
   name: "MIRA",
@@ -262,6 +265,59 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
       // failing must never break Mira's own reply flow.
       console.error("[mira] jolchu route intelligence call failed", err);
     }
+  }
+
+  // Sapar gate: unlike Jolchu (a pure enrichment), a cargo/parcel delivery
+  // intent bypasses RT Command entirely (AGENTS spec s.2 — Sapar is the
+  // primary handler for delivery messages, not an add-on), since RT
+  // Command's passenger-trip extractor has no business trying to interpret
+  // pure cargo text. This mirrors the injection-detection branch above:
+  // detect, handle, reply, return early.
+  const saparDecision = decideSaparRouting(params.text);
+  await logAgentAction({
+    ctx,
+    agent: "MIRA",
+    action: "mira.sapar_gate",
+    entityType: "MiraConversation",
+    entityId: conversation.id,
+    details: { required: saparDecision.required, matchedSignal: saparDecision.matchedSignal },
+  });
+
+  if (saparDecision.required) {
+    const saparResult = await handleSaparInbound({
+      channel,
+      language: detection.language,
+      senderContact: params.senderId,
+      text: params.text,
+      conversationId: conversation.id,
+      ctx,
+    });
+    // Deterministic template only, never an AI paraphrase — a hallucinated
+    // word choice around a price/ETA/executor fact is unacceptable here
+    // (AGENTS spec s.40), unlike RT Command's reply below where the facts
+    // being paraphrased are looser (situation summaries, not numbers).
+    const saparReply = composeSaparReply(saparResult, detection.language);
+    const sent = await sendReply(params.channel, params.senderId, saparReply);
+    await appendMiraMessage(conversation.id, saparReply, ctx.traceId);
+    await updateConversationState(conversation.id, {
+      role: "PARCEL_SENDER",
+      detectedLanguage: detection.language,
+      status: saparResult.status === "NEEDS_INFO" ? "AWAITING_USER" : "ACTIVE",
+      activeIntent: "cargo_delivery",
+      collectedFields: understanding.entities,
+      missingFields: saparResult.missingFields,
+      lastAgentDecision: `sapar_${saparResult.status.toLowerCase()}`,
+      lastTraceId: ctx.traceId,
+    });
+    await logAgentAction({
+      ctx,
+      agent: "MIRA",
+      action: "MIRA_SAPAR_HANDLED",
+      entityType: "MiraConversation",
+      entityId: conversation.id,
+      details: { channel: params.channel, senderId: params.senderId, shipmentId: saparResult.shipmentId, status: saparResult.status, sent },
+    });
+    return { conversationId: conversation.id, traceId: ctx.traceId, replyText: saparReply, sent };
   }
 
   const commandResult = await handleInboundMessage({
