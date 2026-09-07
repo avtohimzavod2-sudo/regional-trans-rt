@@ -98,6 +98,20 @@ async function main() {
   });
   console.log(`Owner dispatcher user ready: ${ownerUsername} (password from SEED_OWNER_PASSWORD or default "changeme123" — change it).`);
 
+  // ARTUR — Founder dispatcher account (AGENTS Master Architecture spec
+  // s.16/s.28). "founder" is the top of role.ts's FOUNDER_ROLES; it is the
+  // only role that may decide on a weekly strategic initiative or be the
+  // recorded recipient of an emergency escalation. "admin" already carries
+  // the same authorization as an operational break-glass (see role.ts).
+  const founderUsername = process.env.SEED_FOUNDER_USERNAME ?? "founder";
+  const founderPassword = process.env.SEED_FOUNDER_PASSWORD ?? "changeme123";
+  await db.dispatcherUser.upsert({
+    where: { username: founderUsername },
+    update: {},
+    create: { username: founderUsername, passwordHash: hashPassword(founderPassword), role: "founder" },
+  });
+  console.log(`Founder dispatcher user ready: ${founderUsername} (password from SEED_FOUNDER_PASSWORD or default "changeme123" — change it).`);
+
   // MIRA KYRGYZ TRAINING — synthetic-only seed data. Idempotent: benchmark
   // cases upsert by their unique `code`; training examples are skipped if
   // an entry with the same `input` already exists. Never seeds real user

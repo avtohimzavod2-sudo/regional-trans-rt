@@ -54,4 +54,11 @@ export const TYYIN_AGENT_CONTRACT: AgentContract = {
     "MATCHED_UNDERPAID -> surfaces via Sapargul's existing PAYMENT_MISMATCH human-treasurer review queue, no duplicate AccountantCase",
     "any accountant-case resolution or closure requires the accountant/admin role — Tyyin itself never records its own resolution (spec s.24)",
   ],
+  // Master Architecture spec s.4/s.20 — Tyyin is the sole exclusive owner
+  // of the central treasury journal; Sapargul reports up to it (see
+  // src/lib/sapargul/orchestrator.ts's reportsTo), and Tyyin reports up to
+  // Artur in turn.
+  reportsTo: "ARTUR",
+  ownsExclusiveCapabilities: ["central_treasury_transaction_record", "accountant_case_escalation"],
+  criticalityLevel: "CRITICAL",
 };

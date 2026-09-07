@@ -32,4 +32,10 @@ export const ADILET_AGENT_CONTRACT: AgentContract = {
     "insufficient policy coverage, cross-department conflict, very serious sanction, or a disputed permanent block -> escalateToDirector()",
     "a normal order never waits on Adilet — it only ever engages via an explicit escalation event (spec s.36)",
   ],
+  // Master Architecture spec s.4/s.20 — Adilet reports directly into the
+  // director-level circuit (never through an operational manager), and is
+  // the sole exclusive owner of arbitration/disciplinary decisions.
+  reportsTo: "ARTUR",
+  ownsExclusiveCapabilities: ["complaint_arbitration_decision", "disciplinary_sanction"],
+  criticalityLevel: "HIGH",
 };

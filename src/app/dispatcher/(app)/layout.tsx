@@ -35,6 +35,9 @@ export default function DispatcherLayout({ children }: { children: React.ReactNo
             <Link href="/dispatcher/tyyin" className="hover:text-neutral-100">
               Тыйын
             </Link>
+            <Link href="/dispatcher/artur" className="hover:text-neutral-100">
+              Артур
+            </Link>
             <Link href="/dispatcher/adilet" className="hover:text-neutral-100">
               Адилет
             </Link>

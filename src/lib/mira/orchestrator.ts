@@ -60,6 +60,11 @@ export const MIRA_AGENT_CONTRACT: AgentContract = {
     "a detected prompt-injection attempt is refused and logged, never silently ignored",
     "provider failures fall back to the deterministic template reply, never a crash",
   ],
+  // Master Architecture spec s.4/s.20 — Mira is RT's single external face;
+  // no other agent may hold "external_customer_communication".
+  reportsTo: "ARTUR",
+  ownsExclusiveCapabilities: ["external_customer_communication"],
+  criticalityLevel: "HIGH",
 };
 
 const OUTCOME_TO_EVENT: Record<CommandResult["outcome"], string> = {

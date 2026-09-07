@@ -25,4 +25,10 @@ export const SAPARGUL_AGENT_CONTRACT: AgentContract = {
     "evidence flags DUPLICATE_REFERENCE/ALREADY_USED_TRANSACTION -> surfaced to the treasurer, never auto-resolved",
     "underpayment detected at treasury review -> payment lands at PAYMENT_MISMATCH, Payment Gate stays closed",
   ],
+  // Master Architecture spec s.20/s.26 — this is that spec's own worked
+  // example of an exclusive capability. No other AgentContract in
+  // AGENT_REGISTRY may declare "confirm_cargo_payment".
+  reportsTo: "TYYIN",
+  ownsExclusiveCapabilities: ["confirm_cargo_payment"],
+  criticalityLevel: "CRITICAL",
 };

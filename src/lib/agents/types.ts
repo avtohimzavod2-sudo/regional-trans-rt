@@ -2,7 +2,15 @@ import type { AgentName } from "@prisma/client";
 
 /** Every RT AI Workforce agent declares this contract so RT Command (and the
  * dispatcher "system health" view) can introspect what it does, without
- * having to read its implementation. */
+ * having to read its implementation.
+ *
+ * The fields below `escalationRules` were added for the RT Master
+ * Architecture / Director Artur spec (s.3/s.26/s.36) and are all optional so
+ * every pre-existing contract stays valid untouched (spec s.0.3: "do not
+ * rewrite working systems unnecessarily"). A new agent's onboarding (spec
+ * s.36) should populate `ownsExclusiveCapabilities` so
+ * src/lib/artur/collisions.ts can actually catch a conflict; an agent that
+ * omits it is simply invisible to collision detection, not an error. */
 export interface AgentContract {
   name: AgentName;
   mission: string;
@@ -12,6 +20,23 @@ export interface AgentContract {
   prohibitedActions: string[];
   kpi: string[];
   escalationRules: string[];
+  /** Who this agent's output ultimately reports to (a manager agent name,
+   * "ARTUR", or "FOUNDER"). Undefined = not yet modeled in the reporting
+   * hierarchy (spec s.8). */
+  reportsTo?: string;
+  /** Capability strings this agent claims EXCLUSIVE ownership of (spec
+   * s.20's single-writer rule). Two contracts in AGENT_REGISTRY must never
+   * share an entry here — see src/lib/artur/collisions.ts. */
+  ownsExclusiveCapabilities?: string[];
+  canRead?: string[];
+  canWrite?: string[];
+  canExecute?: string[];
+  forbiddenCapabilities?: string[];
+  /** Other agent names this agent may typed-hand-off to (spec s.24). */
+  handoffTargets?: string[];
+  escalationTarget?: string;
+  criticalityLevel?: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  active?: boolean;
 }
 
 /** Threaded through every agent call within one RT Command run so all audit

@@ -53,6 +53,13 @@ export const SAPAR_AGENT_CONTRACT: AgentContract = {
     "risk gate returns BLOCK -> shipment is cancelled, never organized, and a CRITICAL incident is opened for audit",
     "risk gate returns ESCALATE -> matching/auto-confirm is skipped and a dispatcher-reviewable incident is opened",
   ],
+  // Master Architecture spec s.20 — Zholaman (cargo commercial manager) has
+  // no implemented agent module yet, so Artur reads Sapar's operational
+  // state directly (spec s.8's "Artur must still have read access to
+  // authoritative RT Core data") rather than through an unbuilt middle tier.
+  reportsTo: "ARTUR",
+  ownsExclusiveCapabilities: ["cargo_operational_status", "assign_cargo_delivery_executor"],
+  criticalityLevel: "HIGH",
 };
 
 export interface SaparInboundParams {

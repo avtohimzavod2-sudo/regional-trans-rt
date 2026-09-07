@@ -1,0 +1,129 @@
+# RT AI Workforce — Agent Constitution
+
+This is the binding rulebook every RT AI agent contract (`AgentContract` in
+`src/lib/agents/types.ts`, declared per-agent in each domain's
+`orchestrator.ts`, indexed in `src/lib/agents/registry.ts`'s
+`AGENT_REGISTRY`) is written against. It codifies AGENTS Master Architecture
+spec sections 0–4, 20, 23–28, 32, 40. If a future agent's contract
+contradicts this document, the contract is wrong, not the document.
+
+## 1. RT Core is the only source of truth
+
+No AI agent — including Artur, the Director — is ever the authoritative
+database. Every agent reads and writes through RT Core's Prisma-backed
+models. An LLM call may *summarize*, *classify*, *draft*, or *propose*; it
+may never be the system of record for a fact that already has a
+deterministic home (a payment's status, a case's decision, a sanction's
+existence). See spec s.2, s.32.
+
+## 2. One capability, one owner
+
+Every operationally critical capability (confirming money received,
+recording a treasury transaction, deciding a disciplinary sanction, sending
+an external customer message, assigning a delivery executor, proposing a
+director-level initiative) has **exactly one** agent whose contract
+declares it in `ownsExclusiveCapabilities`. `src/lib/artur/collisions.ts`'s
+`findCapabilityConflicts` / `assertNoCapabilityConflicts` enforce this
+mechanically — `collisions.test.ts` runs it against the live
+`AGENT_REGISTRY` on every test run, so a second contract accidentally
+claiming an already-owned capability fails CI, not code review. See spec
+s.3, s.20, s.26.
+
+Current exclusive owners (see each agent's `orchestrator.ts` for the full
+contract):
+
+| Capability | Owner |
+|---|---|
+| `confirm_cargo_payment` | SAPARGUL |
+| `central_treasury_transaction_record`, `accountant_case_escalation` | TYYIN |
+| `complaint_arbitration_decision`, `disciplinary_sanction` | ADILET |
+| `cargo_operational_status`, `assign_cargo_delivery_executor` | SAPAR |
+| `external_customer_communication` | MIRA |
+| `director_daily_brief`, `director_weekly_report`, `director_strategic_initiative_proposal` | ARTUR |
+
+## 3. Role-boundary preservation
+
+Each specialist's boundary, established before Artur existed and never
+weakened by Artur's introduction (spec s.4):
+
+- **Mira** — the only agent that talks to a client. Adilet, Sapar, Sapargul,
+  Tyyin never message a customer directly; they hand a neutral summary to
+  Mira.
+- **Sapar** — owns cargo operational status and executor assignment. Never
+  confirms payment.
+- **Sapargul** — turns a confirmed order into a payment request and relays
+  real payment instructions, but the actual "money received" confirmation
+  is a treasurer-only act in `src/lib/sapargul/treasury.ts`, callable only
+  under the `tyyin` treasury-ops role.
+- **Tyyin** — the central treasury journal. Inbound reconciliation only.
+  `TreasuryInboundBankAdapter` has no send/transfer/payout/refund/withdraw
+  method anywhere in its interface — this is enforced by the adapter's
+  *type signature*, not a runtime check that could be bypassed. See
+  `docs/FINANCIAL_BOUNDARIES.md`.
+- **Adilet** — independent arbitration. Never confirms money, never
+  overrides Sapar's operational decisions, never talks to a client
+  directly, never lets a manager silently rewrite an independent decision.
+- **Artur (Director)** — observes, synthesizes, proposes. Never a universal
+  execution agent: `ARTUR_AGENT_CONTRACT.forbiddenCapabilities` lists every
+  capability above by name, and `src/lib/artur/boundary.test.ts` is a
+  static source-scan asserting no file under `src/lib/artur/` imports a
+  mutation function from Sapargul/Tyyin/Adilet's modules directly.
+
+A human manager role (Zholaman/Akzhol in the spec's terminology) sits above
+individual specialists operationally but still may not rewrite an
+independent Adilet decision, confirm a payment itself, or bypass Tyyin's
+treasury journal — the AI boundaries above bind human dispatcher roles
+acting through the same code paths, not only AI callers.
+
+## 4. Deterministic rules first, LLM context second
+
+Severity, workflow-state transitions, idempotency, and financial arithmetic
+are plain functions (`src/lib/artur/severity.ts`, `initiatives.ts`,
+`period.ts`) that never call a model. An LLM may explain *why* a
+deterministic severity was assigned; it never assigns the severity itself.
+See spec s.19, s.23, s.32.
+
+## 5. Never fabricate
+
+A number that cannot be computed from real data is reported as missing
+(`missingDataNotes`, `available: false` on a `KpiRow`), never invented. A
+cause that is not yet confirmed is labeled a hypothesis, never stated as
+fact (`ProblemOfTheWeek.rootCause` is nullable — `null` means "not yet
+established," and the weekly report renders that distinction explicitly).
+A delivery channel that does not exist is never claimed to have delivered
+(`NotificationDelivery` — see `docs/ARTUR_DIRECTOR_PROTOCOL.md` s.30). See
+spec s.34.
+
+## 6. Append-only, idempotent, typed
+
+Financial and audit records are never silently overwritten — every mutation
+lands as a new row or a state-machine transition on an existing one, never
+a destructive update (spec s.25). Every externally-triggered or
+scheduler-triggered mutation carries a persistent idempotency key (a
+`sourceEventKey`, a `jobName_periodKey` composite unique, a
+`reportDate`/`weekStartDate` unique) so a retry or a duplicate cron
+invocation is a no-op, never a duplicate record (spec s.21–22, s.31).
+Handoffs between agents are typed events (`ArturEvent`, `TyyinEvent`,
+`AdiletEvent` unions), never a free-text string an LLM could misspell (spec
+s.24).
+
+## 7. Onboarding a new agent
+
+1. Add the agent to the `AgentName` Prisma enum.
+2. Write its `orchestrator.ts` declaring a full `AgentContract`: mission,
+   inputs/outputs, permissions, `prohibitedActions`, KPIs, escalation
+   rules, `reportsTo`, and — if it owns anything operationally critical —
+   `ownsExclusiveCapabilities` plus `forbiddenCapabilities` for anything it
+   must explicitly never touch.
+3. Register it in `AGENT_REGISTRY` (`src/lib/agents/registry.ts`).
+4. Run `collisions.test.ts` (or just `assertNoCapabilityConflicts`) before
+   merging — a capability collision is a blocking defect, not a warning.
+5. If the agent mutates state, give every mutating entry point an
+   idempotency key and an append-only audit trail via its own
+   `log<Agent>Action` / `emit<Agent>Event` pair, mirroring
+   `src/lib/artur/events.ts`.
+
+This scales to 100+ agents because nothing above is agent-count-dependent:
+collision detection is O(agents × capabilities), the registry is a flat
+array, and every boundary is declared data (`AgentContract` fields) checked
+by generic code, not a growing pile of special cases.

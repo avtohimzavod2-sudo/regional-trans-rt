@@ -106,6 +106,7 @@ enum AgentName {
   SAPARGUL
   ADILET
   TYYIN
+  ARTUR
 }
 
 enum PaymentMode {
@@ -1651,10 +1652,10 @@ enum AdiletAppealStatus {
 }
 
 model AdiletCase {
-  id       String          @id @default(cuid())
-  caseType AdiletCaseType
-  severity AdiletSeverity  @default(NORMAL)
-  status   AdiletCaseStatus @default(OPEN)
+  id         String           @id @default(cuid())
+  caseType   AdiletCaseType
+  severity   AdiletSeverity   @default(NORMAL)
+  status     AdiletCaseStatus @default(OPEN)
   reviewMode AdiletReviewMode @default(ADILET_REVIEW)
 
   // Escalation origin (spec s.2) — which agent/actor opened this case.
@@ -1705,8 +1706,8 @@ model AdiletEvidence {
   case   AdiletCase @relation(fields: [caseId], references: [id])
 
   type        AdiletEvidenceType
-  factStatus  AdiletFactStatus     @default(CLAIM)
-  trust       AdiletEvidenceTrust  @default(MEDIUM)
+  factStatus  AdiletFactStatus    @default(CLAIM)
+  trust       AdiletEvidenceTrust @default(MEDIUM)
   source      String // e.g. "AuditLogEntry", "SupportCase", "ShipmentIncident", "manager"
   sourceId    String? // id of the source record, when one exists
   occurredAt  DateTime
@@ -1726,11 +1727,11 @@ model AdiletDecision {
   findings              String
   verifiedFacts         String[]
   disputedFacts         String[]
-  insufficientEvidence  Boolean   @default(false)
+  insufficientEvidence  Boolean               @default(false)
   policyBasis           String
   proportionalityReason String?
   duration              String?
-  appealAllowed         Boolean   @default(true)
+  appealAllowed         Boolean               @default(true)
   reviewAfter           DateTime?
 
   decidedByActorType ActorType
@@ -1745,8 +1746,8 @@ model AdiletDecision {
   revisedBy            AdiletDecision? @relation("AdiletDecisionRevision")
 
   sanction        AdiletSanction?
-  appeals         AdiletAppeal[] @relation("AdiletAppealDecision")
-  appealReviewFor AdiletAppeal?  @relation("AdiletAppealReviewDecision")
+  appeals         AdiletAppeal[]  @relation("AdiletAppealDecision")
+  appealReviewFor AdiletAppeal?   @relation("AdiletAppealReviewDecision")
 
   @@index([caseId])
 }
@@ -1794,13 +1795,13 @@ model AdiletAppeal {
   requestedById        String?
   requestReason        String
 
-  reviewedAt         DateTime?
-  reviewedByActorId  String?
-  reviewNotes        String?
+  reviewedAt        DateTime?
+  reviewedByActorId String?
+  reviewNotes       String?
 
   // The review's own AdiletDecision, when one is issued (spec s.19: both
   // ORIGINAL_DECISION and REVIEW_DECISION are kept, never a blind overwrite).
-  reviewDecisionId String? @unique
+  reviewDecisionId String?         @unique
   reviewDecision   AdiletDecision? @relation("AdiletAppealReviewDecision", fields: [reviewDecisionId], references: [id])
 
   createdAt DateTime @default(now())
@@ -1876,7 +1877,7 @@ model TreasuryTransaction {
 
   // Bank's own transaction id — the idempotency guard for duplicate
   // webhook/poll delivery (spec s.11/s.47's "duplicate webhook" race).
-  externalTransactionId String @unique
+  externalTransactionId String             @unique
   accountRef            String // masked/alias account reference — never a full account/card number
   department            TreasuryDepartment @default(CARGO)
 
@@ -1915,10 +1916,10 @@ model TreasuryTransaction {
 // records what happened here; it never executes any outgoing action itself
 // (no such method exists in its domain interface).
 model AccountantCase {
-  id       String                @id @default(cuid())
-  caseType AccountantCaseType
-  status   AccountantCaseStatus  @default(OPEN)
-  department TreasuryDepartment  @default(CARGO)
+  id         String               @id @default(cuid())
+  caseType   AccountantCaseType
+  status     AccountantCaseStatus @default(OPEN)
+  department TreasuryDepartment   @default(CARGO)
 
   // Loose string references only (mirrors AdiletCase's decoupling choice,
   // spec s.61 step 7) — never a hard FK to ShipmentPayment, so Tyyin stays
@@ -1959,4 +1960,257 @@ model AccountantCase {
   @@index([relatedPaymentId])
   @@index([relatedTransactionId])
   @@index([openedAt])
+}
+
+// ==========================================================================
+// ARTUR — AI Director of Regional Trans / RT (AGENTS "Master Architecture:
+// Unified AI Organization + Director Artur" spec). Sits above every
+// specialist agent, below the Founder. Artur never becomes an authoritative
+// database for specialist domains — every number in a brief/report traces
+// back to a real read from Sapar/Sapargul/Tyyin/Adilet/passenger data (spec
+// s.1/s.2/s.34); Artur's own models below only ever store Artur's *own*
+// output (briefs, reports, initiatives, incidents, deliveries, job runs),
+// never a second copy of another domain's authoritative state.
+//
+// Idempotency pattern (spec s.22/s.31): FounderBrief/WeeklyDirectorReport
+// are keyed by their reporting period (reportDate / weekStartDate, both
+// @unique) so a duplicate scheduler firing or restart can never create two
+// briefs for the same day — mirrors TreasuryTransaction.externalTransactionId
+// and AccountantCase.sourceEventKey elsewhere in this codebase.
+// ScheduledJobRun additionally mirrors JolchuDataRefreshRun's RUNNING /
+// SUCCEEDED / FAILED run-record pattern, unique per (jobName, periodKey), so
+// a crashed-and-restarted cron invocation can detect a run already in
+// flight/completed rather than duplicating side effects.
+// ==========================================================================
+
+// Deterministic severity ladder (spec s.19) — Claude may add reasoning on
+// top of a signal, but the ladder itself is fixed application logic, never
+// left to free-form LLM judgement.
+enum Severity {
+  INFO
+  NORMAL
+  ATTENTION
+  HIGH
+  CRITICAL
+}
+
+// Section 1 of the daily Founder Brief (spec s.10.1) — a coarser rollup of
+// Severity for "how is the whole company doing right now".
+enum RtStatus {
+  NORMAL
+  ATTENTION
+  CRITICAL
+}
+
+enum ScheduledJobStatus {
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+enum NotificationDeliveryStatus {
+  PENDING
+  SENDING
+  DELIVERED
+  FAILED
+  RETRYING
+  DEAD_LETTER
+}
+
+// Founder approval workflow for a weekly strategic initiative (spec s.16).
+// Transitions are validated by src/lib/artur/initiatives.ts's explicit state
+// table — an LLM is never allowed to assign one of these strings directly.
+enum FounderInitiativeStatus {
+  PROPOSED
+  APPROVED
+  REJECTED
+  DEFERRED
+  NEEDS_REVISION
+  IN_PROGRESS
+  COMPLETED
+  MEASURED
+}
+
+enum EmergencyResolutionStatus {
+  OPEN
+  ACKNOWLEDGED
+  RESOLVED
+}
+
+// One row per scheduler execution attempt — the restart/duplicate-fire
+// safety net for the 08:00 daily and Monday 10:00 weekly jobs (spec s.31).
+model ScheduledJobRun {
+  id String @id @default(cuid())
+
+  jobName   String // "ARTUR_DAILY_BRIEF" | "ARTUR_WEEKLY_REPORT"
+  // Bishkek-local period key the run is FOR — "YYYY-MM-DD" for daily,
+  // "YYYY-MM-DD" (Monday) for weekly. The idempotency guard itself.
+  periodKey String
+
+  status      ScheduledJobStatus @default(RUNNING)
+  triggeredBy String // "scheduler" | "manual"
+
+  resultRefId String? // FounderBrief.id / WeeklyDirectorReport.id once known
+
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+  errors     String[]
+
+  @@unique([jobName, periodKey])
+  @@index([jobName, status])
+}
+
+// The daily 08:00 Asia/Bishkek Founder Brief (spec s.9/s.10) — reproducible:
+// once generated for a reportDate it is never silently regenerated with
+// different numbers (spec s.29's "management data snapshot" requirement).
+model FounderBrief {
+  id String @id @default(cuid())
+
+  reportDate String @unique // Bishkek-local "YYYY-MM-DD"
+
+  overallStatus RtStatus
+
+  // The 10 required sections (spec s.10), each a small structured object —
+  // validated against src/lib/artur/types.ts's Zod schema before being
+  // persisted (spec s.33). Never hand-assembled free text only.
+  sections Json
+
+  sourceSnapshotAt DateTime // when the underlying RT Core data was read
+  generatedAt      DateTime @default(now())
+
+  jobRunId String? // ScheduledJobRun.id, loose ref
+
+  deliveries NotificationDelivery[] @relation("FounderBriefDeliveries")
+
+  @@index([generatedAt])
+}
+
+// The Monday 10:00 Asia/Bishkek weekly report (spec s.11-s.15).
+model WeeklyDirectorReport {
+  id String @id @default(cuid())
+
+  weekStartDate String @unique // Bishkek-local Monday "YYYY-MM-DD"
+  weekEndDate   String // Bishkek-local Sunday "YYYY-MM-DD"
+
+  // Week-over-week KPI table (spec s.12) — current/previous/absolute/percent/
+  // status per KPI, computed by src/lib/artur/period.ts's pure functions.
+  kpis     Json
+  // "Problems of the week" (spec s.14) — array of structured problem entries.
+  problems Json
+
+  executiveSummary String
+
+  sourceSnapshotAt DateTime
+  generatedAt      DateTime @default(now())
+
+  jobRunId String?
+
+  initiatives DirectorInitiative[]
+  deliveries  NotificationDelivery[] @relation("WeeklyReportDeliveries")
+
+  @@index([generatedAt])
+}
+
+// Exactly 3 of these are created per WeeklyDirectorReport (spec s.15) —
+// enforced by src/lib/artur/initiatives.ts, never left to chance. Each
+// enters the Founder approval workflow independently (spec s.16); Artur
+// never auto-implements one itself.
+model DirectorInitiative {
+  id String @id @default(cuid())
+
+  reportId String
+  report   WeeklyDirectorReport @relation(fields: [reportId], references: [id])
+
+  title          String
+  proposal       String
+  whyNow         String
+  evidence       String
+  expectedEffect String
+  complexity     String
+  resources      String?
+  risks          String
+  priority       String
+  successMetric  String
+
+  status FounderInitiativeStatus @default(PROPOSED)
+
+  proposedAt           DateTime  @default(now())
+  decisionAt           DateTime?
+  decisionByActorId    String?
+  decisionNote         String?
+  implementationResult String?
+  measuredEffect       String?
+  measuredAt           DateTime?
+
+  @@index([reportId])
+  @@index([status])
+}
+
+// Force-majeure / critical escalation to the Founder, reachable 24/7 (spec
+// s.17/s.18) — independent of the daily/weekly cadence. sourceEventKey is
+// the idempotency guard so a repeatedly-detected condition (e.g. the same
+// discrepancy re-observed on every scheduler tick) opens exactly one
+// incident, mirroring AdiletCase/AccountantCase's sourceEventKey pattern.
+model EmergencyIncident {
+  id String @id @default(cuid())
+
+  source          AgentName?
+  severity        Severity // HIGH or CRITICAL only — spec s.17 (validated in code)
+  correlationId   String?
+  relatedEntities Json?
+
+  whatHappened              String
+  currentStatus             String
+  peopleOrdersMoneyAffected String?
+  actionsTaken              String?
+  immediateRisks            String?
+  availableOptions          String?
+  recommendation            String?
+  decisionRequired          String?
+  decisionDeadline          DateTime?
+
+  founderResponse  String?
+  resolutionStatus EmergencyResolutionStatus @default(OPEN)
+
+  sourceEventKey String? @unique
+
+  detectedAt DateTime  @default(now())
+  resolvedAt DateTime?
+
+  deliveries NotificationDelivery[] @relation("EmergencyIncidentDeliveries")
+
+  @@index([resolutionStatus, severity])
+  @@index([detectedAt])
+}
+
+// NotificationGateway's persistence layer (spec s.30) — a clean delivery
+// abstraction prepared now with NO real channel adapter wired (never fakes
+// delivery: with no adapter configured, status simply becomes FAILED with an
+// honest lastError, not DELIVERED). idempotencyKey prevents a retried
+// generate-and-send from ever double-notifying the Founder for the same
+// brief/report/incident (spec s.22).
+model NotificationDelivery {
+  id String @id @default(cuid())
+
+  kind    String // "FOUNDER_DAILY_BRIEF" | "FOUNDER_WEEKLY_REPORT" | "FOUNDER_EMERGENCY_ALERT"
+  channel String? // null until a real channel adapter (Telegram/WhatsApp/...) is wired
+
+  founderBriefId      String?
+  founderBrief        FounderBrief?         @relation("FounderBriefDeliveries", fields: [founderBriefId], references: [id])
+  weeklyReportId      String?
+  weeklyReport        WeeklyDirectorReport? @relation("WeeklyReportDeliveries", fields: [weeklyReportId], references: [id])
+  emergencyIncidentId String?
+  emergencyIncident   EmergencyIncident?    @relation("EmergencyIncidentDeliveries", fields: [emergencyIncidentId], references: [id])
+
+  status        NotificationDeliveryStatus @default(PENDING)
+  attempts      Int                        @default(0)
+  lastAttemptAt DateTime?
+  lastError     String?
+
+  idempotencyKey String @unique
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([kind, status])
 }
