@@ -74,6 +74,30 @@ async function main() {
     console.log(`Seeded sandbox PaymentDestination "${sandboxDestinationLabel}".`);
   }
 
+  // TYYIN — human accountant + owner dispatcher accounts (AGENTS Tyyin
+  // spec s.18/s.24/s.28-s.30). "accountant" may record/close an
+  // AccountantCase resolution; "owner" gets OWNER_DIRECT_CALL read-only
+  // financial visibility on the Tyyin dashboard. Neither role can ever
+  // trigger outgoing money movement — that capability does not exist in
+  // Tyyin's code, not just its permissions (see src/lib/tyyin/bank-adapter.ts).
+  const accountantUsername = process.env.SEED_ACCOUNTANT_USERNAME ?? "accountant";
+  const accountantPassword = process.env.SEED_ACCOUNTANT_PASSWORD ?? "changeme123";
+  await db.dispatcherUser.upsert({
+    where: { username: accountantUsername },
+    update: {},
+    create: { username: accountantUsername, passwordHash: hashPassword(accountantPassword), role: "accountant" },
+  });
+  console.log(`Accountant dispatcher user ready: ${accountantUsername} (password from SEED_ACCOUNTANT_PASSWORD or default "changeme123" — change it).`);
+
+  const ownerUsername = process.env.SEED_OWNER_USERNAME ?? "owner";
+  const ownerPassword = process.env.SEED_OWNER_PASSWORD ?? "changeme123";
+  await db.dispatcherUser.upsert({
+    where: { username: ownerUsername },
+    update: {},
+    create: { username: ownerUsername, passwordHash: hashPassword(ownerPassword), role: "owner" },
+  });
+  console.log(`Owner dispatcher user ready: ${ownerUsername} (password from SEED_OWNER_PASSWORD or default "changeme123" — change it).`);
+
   // MIRA KYRGYZ TRAINING — synthetic-only seed data. Idempotent: benchmark
   // cases upsert by their unique `code`; training examples are skipped if
   // an entry with the same `input` already exists. Never seeds real user

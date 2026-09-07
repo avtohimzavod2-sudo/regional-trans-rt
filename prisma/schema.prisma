@@ -105,6 +105,7 @@ enum AgentName {
   SAPAR
   SAPARGUL
   ADILET
+  TYYIN
 }
 
 enum PaymentMode {
@@ -1806,4 +1807,156 @@ model AdiletAppeal {
 
   @@index([caseId])
   @@index([status])
+}
+
+// ==========================================================================
+// TYYIN — RT's chief AI treasurer / central financial control circuit
+// (AGENTS Tyyin spec s.0-s.73). Sits above Sapargul in the org chart: reads
+// real bank data, reconciles it against ShipmentPayment/PaymentDestination
+// (reused, never duplicated), and is the source that drives Sapargul's
+// existing single-writer confirmation boundary (src/lib/sapargul/treasury.ts)
+// from a verified real transaction instead of a human-reviewed receipt.
+//
+// Hard invariant (spec s.6/s.28/s.51): Tyyin's bank adapter interface
+// (src/lib/tyyin/bank-adapter.ts) is structurally inbound-only — no
+// transfer/payout/refund/withdrawal/debit/sendMoney method exists anywhere
+// in its domain, including for OWNER_DIRECT_CALL. This is enforced by the
+// TypeScript interface shape, not by a runtime permission check.
+//
+// TreasuryTransaction *is* the append-only central financial journal (spec
+// s.10/s.13/s.65) — a second parallel ledger table would only duplicate it,
+// so no separate "ledger" model is added. AuditLogEntry (agent: TYYIN,
+// via emitTyyinEvent) remains the action/decision audit trail, consistent
+// with every other RT AI Workforce agent in this codebase (no second event
+// bus — see src/lib/sapargul/events.ts / src/lib/adilet/events.ts).
+//
+// AccountantCase mirrors AdiletCase's shape deliberately (Case + resolution
+// fields in one model, no separate five-model split) — Tyyin never executes
+// an outgoing action, so there is no enforcement/appeal ladder to model,
+// only: escalate -> a human accountant acts outside this system -> the
+// result is recorded here for audit, never triggered from here.
+
+enum TreasuryDepartment {
+  CARGO // Sapargul's live cargo/parcel cashier contour
+  PASSENGER // modeled from day one (spec s.38); no passenger cashier is wired yet (spec s.60 exclusion)
+  OTHER
+}
+
+enum TreasuryTransactionStatus {
+  RECEIVED // just ingested, not yet reconciled
+  MATCHED // reconciled to exactly one ShipmentPayment and confirmed via treasury.ts
+  NEEDS_MANUAL_RECONCILIATION // no/ambiguous/currency-mismatched reference — never guessed, never dropped
+}
+
+enum AccountantCaseType {
+  REFUND_REQUIRED
+  OVERPAYMENT_RESOLUTION
+  COMPENSATION_REVIEW
+  WRONG_PAYMENT
+  DUPLICATE_PAYMENT
+  UNMATCHED_PAYMENT
+  CUSTOMER_DISPUTE
+  MANUAL_RECONCILIATION
+  OTHER
+}
+
+enum AccountantCaseStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+// Every real inbound bank transaction Tyyin ever sees (spec s.2/s.9/s.10) —
+// the append-only source-of-truth journal. Rows are never deleted; a
+// misreconciled row is corrected by updating its own status/notes, not by
+// removal (spec s.65's "append-only where possible").
+model TreasuryTransaction {
+  id String @id @default(cuid())
+
+  // Bank's own transaction id — the idempotency guard for duplicate
+  // webhook/poll delivery (spec s.11/s.47's "duplicate webhook" race).
+  externalTransactionId String @unique
+  accountRef            String // masked/alias account reference — never a full account/card number
+  department            TreasuryDepartment @default(CARGO)
+
+  amountSom Int
+  currency  String @default("KGS")
+
+  // Parsed from the bank statement narrative — the exact-match key
+  // reconciliation.ts uses against ShipmentPayment.orderReference. Never
+  // fuzzy-matched (spec s.44's "falls back to NEEDS_MANUAL_RECONCILIATION").
+  paymentReference   String?
+  counterpartyMasked String?
+
+  transactionTime DateTime // when the bank recorded it
+  receivedAt      DateTime @default(now()) // when Tyyin ingested it
+
+  status TreasuryTransactionStatus @default(RECEIVED)
+
+  matchedPaymentId    String?
+  matchedAt           DateTime?
+  reconciliationNotes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  accountantCases AccountantCase[]
+
+  @@index([externalTransactionId])
+  @@index([paymentReference])
+  @@index([status])
+  @@index([transactionTime])
+  @@index([department])
+  @@index([accountRef])
+}
+
+// Tyyin's escalation to a real human accountant (spec s.18-s.24) — Tyyin
+// records what happened here; it never executes any outgoing action itself
+// (no such method exists in its domain interface).
+model AccountantCase {
+  id       String                @id @default(cuid())
+  caseType AccountantCaseType
+  status   AccountantCaseStatus  @default(OPEN)
+  department TreasuryDepartment  @default(CARGO)
+
+  // Loose string references only (mirrors AdiletCase's decoupling choice,
+  // spec s.61 step 7) — never a hard FK to ShipmentPayment, so Tyyin stays
+  // structurally decoupled from Sapargul's schema evolving independently.
+  relatedPaymentId     String?
+  relatedTransactionId String?
+  transaction          TreasuryTransaction? @relation(fields: [relatedTransactionId], references: [id])
+
+  amountSom Int?
+  currency  String @default("KGS")
+  summary   String
+
+  openedByType ActorType
+  openedById   String?
+
+  // Caller-supplied dedupe key (e.g. "TYYIN:OVERPAY:<transactionId>") so a
+  // retried escalation can never open a second case for the same event
+  // (mirrors AdiletCase.sourceEventKey, spec s.34's idempotency pattern).
+  sourceEventKey String? @unique
+
+  assignedAccountantId String?
+
+  // What the accountant reports they did *outside* this system (e.g. sent a
+  // refund via the bank's own app) — recorded, never triggered from here
+  // (spec s.24's "records but never executes").
+  resolutionType         String?
+  resolutionSummary      String?
+  resolutionRecordedAt   DateTime?
+  resolutionRecordedById String?
+
+  openedAt  DateTime  @default(now())
+  closedAt  DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([status, caseType])
+  @@index([department, status])
+  @@index([relatedPaymentId])
+  @@index([relatedTransactionId])
+  @@index([openedAt])
 }

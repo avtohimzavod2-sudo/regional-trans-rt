@@ -7,8 +7,16 @@
 // Any authenticated dispatcher may run Sapargul's own operational actions
 // (create a payment request, issue instructions, record evidence, run a
 // preliminary check, flag a discrepancy, prepare a report) — spec s.27.
-// Only these two roles may ever confirm/reject a real money receipt.
-const TREASURY_ROLES = new Set(["treasurer", "admin"]);
+// Only these roles may ever confirm/reject a real money receipt.
+//
+// "tyyin" is Tyyin's own reconciliation pipeline (AGENTS Tyyin spec
+// s.2/s.16) calling confirmActualPaymentReceipt on an exact, verified real
+// bank-transaction match — never a dispatcher-facing role, never assignable
+// via the login form, only ever passed internally by
+// src/lib/tyyin/ingestion.ts so this remains the single writer of
+// PAYMENT_CONFIRMED (this file's own module-level invariant) rather than a
+// second, duplicated confirmation path.
+const TREASURY_ROLES = new Set(["treasurer", "admin", "tyyin"]);
 
 export function isTreasuryRole(role: string): boolean {
   return TREASURY_ROLES.has(role.toLowerCase());
