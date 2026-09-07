@@ -104,6 +104,7 @@ enum AgentName {
   JOLCHU
   SAPAR
   SAPARGUL
+  ADILET
 }
 
 enum PaymentMode {
@@ -1505,4 +1506,304 @@ model ShipmentPayment {
 
   @@index([status])
   @@index([transactionReference])
+}
+
+// ==========================================================================
+// ADILET — RT's independent dispute-resolution & disciplinary agent
+// (AGENTS Adilet spec s.0-s.62). Reports only to the AI Director, never to
+// any single department (spec s.3/s.25). Engages only on escalation from
+// Mira/Sapar/Sapargul/Zholaman/Akzhol/the treasurer/other agents — never in
+// every normal dialog (spec s.2). Additive-only: no existing model is
+// altered here. Enforcement writes to Driver.status/DeliveryExecutor.status
+// reuse those models' existing enums directly (spec s.33) instead of
+// inventing a parallel status field; Passenger.isBlocked is set only for a
+// CLIENT sanctionType=BLOCKED with a resolvable Passenger subject (spec
+// s.46 explicitly excludes a larger passenger-core rework, so no new tiered
+// client-access fields are added here — see src/lib/adilet/enforcement.ts).
+//
+// Case / Evidence / Decision / Sanction / Appeal are five distinct models
+// (spec s.53), each independently indexed for the case list, subject
+// lookup, and sanction-expiry queries Adilet needs at RT's 500-3000/hour
+// scale (spec s.37/s.49) without a full-table scan.
+
+enum AdiletCaseType {
+  CUSTOMER_COMPLAINT
+  CUSTOMER_ABUSE
+  EXECUTOR_MISCONDUCT
+  SERVICE_FAILURE
+  PAYMENT_DISPUTE
+  SAFETY_COMPLAINT
+  DAMAGE_OR_LOSS
+  NO_SHOW
+  PRICE_DISPUTE
+  CANCELLATION_DISPUTE
+  AGENT_ESCALATION
+  OTHER
+}
+
+// Doubles as both case severity (spec s.11) and intake priority (spec
+// s.39) — RT's own CRITICAL definition (safety/violence/active fraud) is
+// identical in both places, so a second near-duplicate enum would only add
+// surface area without adding meaning.
+enum AdiletSeverity {
+  LOW
+  NORMAL
+  HIGH
+  CRITICAL
+}
+
+enum AdiletCaseStatus {
+  OPEN
+  UNDER_REVIEW
+  AWAITING_EVIDENCE
+  DECIDED
+  APPEAL_REQUESTED
+  UNDER_APPEAL_REVIEW
+  CLOSED
+}
+
+// Escalation path ADILET_REVIEW -> DIRECTOR_REVIEW (spec s.40).
+enum AdiletReviewMode {
+  ADILET_REVIEW
+  DIRECTOR_REVIEW
+}
+
+enum AdiletEvidenceType {
+  MESSAGE
+  ORDER_EVENT
+  PAYMENT_EVENT
+  SHIPMENT_INCIDENT
+  DRIVER_STATUS
+  PROVIDER_RESPONSE
+  CUSTOMER_FEEDBACK
+  MANAGER_NOTE
+  SYSTEM_LOG
+  OTHER
+}
+
+// Trust class per evidence item (spec s.13's "reliability/trust class").
+enum AdiletEvidenceTrust {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+// Separates a claim from a verified fact everywhere (spec s.14) — an
+// individual evidence item's own status, distinct from AdiletDecision's
+// verifiedFacts/disputedFacts summary of the whole case.
+enum AdiletFactStatus {
+  CLAIM
+  VERIFIED_FACT
+  DISPUTED
+}
+
+enum AdiletDecisionOutcome {
+  NO_VIOLATION
+  RESOLVED_NO_SANCTION
+  WARNING
+  SANCTION_APPLIED
+  INSUFFICIENT_EVIDENCE
+  ESCALATED_TO_DIRECTOR
+}
+
+// Who a sanction is against. DRIVER = passenger-side Driver; EXECUTOR =
+// Sapar's cargo DeliveryExecutor; CLIENT = passenger or cargo sender.
+enum AdiletSubjectType {
+  CLIENT
+  DRIVER
+  EXECUTOR
+}
+
+// Union of both proportional step-ladders from spec s.5 (client:
+// DEESCALATION..BLOCKED; driver/executor: ADVISORY..SUSPENDED, sharing
+// FORMAL_WARNING/BLOCKED) in one enum — the policy engine restricts which
+// values are valid for a given AdiletSubjectType, so a single enum avoids
+// duplicating FORMAL_WARNING/BLOCKED across two near-identical types.
+enum AdiletSanctionType {
+  DEESCALATION
+  EXPLANATION
+  FORMAL_WARNING
+  TEMPORARY_RESTRICTION
+  TEMPORARY_SUSPENSION
+  BLOCKED
+  ADVISORY
+  RELIABILITY_PENALTY
+  LIMITED_ACCESS
+  SUSPENDED
+}
+
+enum AdiletSanctionStatus {
+  ACTIVE
+  EXPIRED
+  REVERSED
+}
+
+// Exact statuses from spec s.17.
+enum AdiletAppealStatus {
+  NO_APPEAL
+  APPEAL_AVAILABLE
+  APPEAL_REQUESTED
+  UNDER_REVIEW
+  UPHELD
+  MODIFIED
+  OVERTURNED
+}
+
+model AdiletCase {
+  id       String          @id @default(cuid())
+  caseType AdiletCaseType
+  severity AdiletSeverity  @default(NORMAL)
+  status   AdiletCaseStatus @default(OPEN)
+  reviewMode AdiletReviewMode @default(ADILET_REVIEW)
+
+  // Escalation origin (spec s.2) — which agent/actor opened this case.
+  sourceAgent  AgentName?
+  openedByType ActorType
+  openedById   String?
+
+  // Loose string references only, never a Prisma relation, so Adilet stays
+  // decoupled from Passenger/Driver/DeliveryExecutor/Shipment schema churn
+  // (spec s.61 step 7's "minimally-coupled domain architecture").
+  relatedUserId     String?
+  relatedExecutorId String?
+  shipmentId        String?
+  tripId            String?
+  paymentId         String?
+  managerContext    String?
+
+  summary         String
+  allegation      String
+  evidenceSummary String?
+  appealStatus    AdiletAppealStatus @default(NO_APPEAL)
+
+  // Caller-supplied dedupe key (e.g. "SAPAR:<shipmentId>:NO_SHOW") so a
+  // retried escalation event can never open a second case (spec s.34).
+  sourceEventKey String? @unique
+
+  openedAt   DateTime  @default(now())
+  resolvedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  evidence  AdiletEvidence[]
+  decisions AdiletDecision[]
+  sanctions AdiletSanction[]
+  appeals   AdiletAppeal[]
+
+  @@index([status, severity])
+  @@index([relatedExecutorId, status])
+  @@index([relatedUserId, status])
+  @@index([shipmentId])
+  @@index([caseType, status])
+  @@index([openedAt])
+}
+
+model AdiletEvidence {
+  id     String     @id @default(cuid())
+  caseId String
+  case   AdiletCase @relation(fields: [caseId], references: [id])
+
+  type        AdiletEvidenceType
+  factStatus  AdiletFactStatus     @default(CLAIM)
+  trust       AdiletEvidenceTrust  @default(MEDIUM)
+  source      String // e.g. "AuditLogEntry", "SupportCase", "ShipmentIncident", "manager"
+  sourceId    String? // id of the source record, when one exists
+  occurredAt  DateTime
+  description String
+
+  createdAt DateTime @default(now())
+
+  @@index([caseId])
+}
+
+model AdiletDecision {
+  id     String     @id @default(cuid())
+  caseId String
+  case   AdiletCase @relation(fields: [caseId], references: [id])
+
+  outcome               AdiletDecisionOutcome
+  findings              String
+  verifiedFacts         String[]
+  disputedFacts         String[]
+  insufficientEvidence  Boolean   @default(false)
+  policyBasis           String
+  proportionalityReason String?
+  duration              String?
+  appealAllowed         Boolean   @default(true)
+  reviewAfter           DateTime?
+
+  decidedByActorType ActorType
+  decidedByActorId   String?
+  decidedAt          DateTime  @default(now())
+
+  // Self-relation preserving history on overturn (spec s.19): a review
+  // decision points back at the original it supersedes; the original is
+  // never deleted or edited in place.
+  supersedesDecisionId String?         @unique
+  supersedesDecision   AdiletDecision? @relation("AdiletDecisionRevision", fields: [supersedesDecisionId], references: [id])
+  revisedBy            AdiletDecision? @relation("AdiletDecisionRevision")
+
+  sanction        AdiletSanction?
+  appeals         AdiletAppeal[] @relation("AdiletAppealDecision")
+  appealReviewFor AdiletAppeal?  @relation("AdiletAppealReviewDecision")
+
+  @@index([caseId])
+}
+
+model AdiletSanction {
+  id     String     @id @default(cuid())
+  caseId String
+  case   AdiletCase @relation(fields: [caseId], references: [id])
+
+  // One decision produces at most one sanction — the unique constraint IS
+  // the idempotency guard for spec s.34 (a repeated "apply sanction" call
+  // for the same decision can never double-apply).
+  decisionId String         @unique
+  decision   AdiletDecision @relation(fields: [decisionId], references: [id])
+
+  subjectType  AdiletSubjectType
+  subjectId    String
+  sanctionType AdiletSanctionType
+  status       AdiletSanctionStatus @default(ACTIVE)
+  reason       String
+
+  startAt        DateTime  @default(now())
+  expiresAt      DateTime?
+  reversedAt     DateTime?
+  reversedReason String?
+
+  createdAt DateTime @default(now())
+
+  @@index([subjectType, subjectId, status])
+  @@index([status, expiresAt])
+  @@index([caseId])
+}
+
+model AdiletAppeal {
+  id     String     @id @default(cuid())
+  caseId String
+  case   AdiletCase @relation(fields: [caseId], references: [id])
+
+  decisionId String
+  decision   AdiletDecision @relation("AdiletAppealDecision", fields: [decisionId], references: [id])
+
+  status AdiletAppealStatus @default(APPEAL_REQUESTED)
+
+  requestedByActorType ActorType
+  requestedById        String?
+  requestReason        String
+
+  reviewedAt         DateTime?
+  reviewedByActorId  String?
+  reviewNotes        String?
+
+  // The review's own AdiletDecision, when one is issued (spec s.19: both
+  // ORIGINAL_DECISION and REVIEW_DECISION are kept, never a blind overwrite).
+  reviewDecisionId String? @unique
+  reviewDecision   AdiletDecision? @relation("AdiletAppealReviewDecision", fields: [reviewDecisionId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@index([caseId])
+  @@index([status])
 }

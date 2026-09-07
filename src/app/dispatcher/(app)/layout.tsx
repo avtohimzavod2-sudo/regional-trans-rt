@@ -32,6 +32,9 @@ export default function DispatcherLayout({ children }: { children: React.ReactNo
             <Link href="/dispatcher/finance/treasury" className="hover:text-neutral-100">
               Казначей
             </Link>
+            <Link href="/dispatcher/adilet" className="hover:text-neutral-100">
+              Адилет
+            </Link>
             <Link href="/dispatcher/support" className="hover:text-neutral-100">
               Обращения
             </Link>
