@@ -5,7 +5,7 @@
 // Command's own template send is suppressed) and only owns understanding,
 // language, conversation memory, and the outward reply.
 import { db } from "@/lib/db";
-import type { Channel } from "@prisma/client";
+import type { Channel, RequestStatus } from "@prisma/client";
 import { handleInboundMessage, type CommandResult, type InboundChannel } from "@/lib/agents/command";
 import { logAgentAction, rootContext } from "@/lib/agents/trace";
 import { quickClassifyMessage } from "@/lib/agents/quick-classify";
@@ -23,8 +23,26 @@ import {
   updateConversationState,
 } from "./session";
 import { checkSafety, detectInjectionAttempt, safetyRefusalText } from "./safety";
-import { composeFallbackReply, situationForOutcome } from "./reply-templates";
+import {
+  composeBaggageExcessNote,
+  composeDeclineReasonAcknowledgement,
+  composeFallbackReply,
+  composeFinanceAcknowledgement,
+  composePartnerAcknowledgement,
+  situationForOutcome,
+} from "./reply-templates";
 import { mapQuickRoleToMiraRole } from "./types";
+import type { MiraNormalizedFields } from "./types";
+import { classifyBaggageWeight, extractBaggageWeightKg, isLikelyCargoNotBaggage, resolveBaggageCharges } from "./baggage-policy";
+import { buildSignificantExcessBaggageFinancialIntent, recordPassengerFinancialIntent } from "./passenger-finance";
+import { deriveCargoLeadStage, deriveLeadStage } from "./lead-lifecycle";
+import {
+  buildDeclineReasonPrompt,
+  classifyDeclineReasonText,
+  shouldAskDeclineReason,
+  type DeclineReasonConversationFlags,
+} from "./decline-reason";
+import { handlePassengerResponse } from "@/lib/matching/orchestrate";
 import { decideJolchuRouting } from "@/lib/jolchu/routing-decision";
 import { resolveRouteIntelligence } from "@/lib/jolchu/orchestrator";
 import type { RouteIntelligenceResult } from "@/lib/jolchu/types";
@@ -32,7 +50,10 @@ import { pickJolchuLocationInputs } from "./jolchu-bridge";
 import { decideSaparRouting } from "@/lib/sapar/routing-decision";
 import { handleSaparInbound } from "@/lib/sapar/orchestrator";
 import { classifyConfirmationReply, confirmShipmentQuote, findShipmentAwaitingConfirmation, rejectShipmentQuote } from "@/lib/sapar/confirmation";
-import { composeSaparReply } from "./sapar-bridge";
+import { composeSaparReply, introduceSaparLine, saparStillOwnsConversation } from "./sapar-bridge";
+import { classifyMiraTopIntent } from "./intent-classifier";
+import { openCase } from "@/lib/adilet/case";
+import { clientFacingSummary } from "@/lib/adilet/bridge";
 
 export const MIRA_AGENT_CONTRACT: AgentContract = {
   name: "MIRA",
@@ -126,6 +147,15 @@ async function logProviderCall(params: {
   });
 }
 
+// CommandResult.data is typed unknown (it carries different shapes per
+// outcome) — this narrows it honestly at runtime rather than casting blind,
+// so lead-lifecycle.ts's deriveLeadStage only ever receives a real
+// RequestStatus that was actually checked to be there (spec: "do not fake
+// reachability").
+function isTripRequestLike(data: unknown): data is { status: RequestStatus } {
+  return typeof data === "object" && data !== null && "status" in data;
+}
+
 function fastLayerUnderstanding(quick: ReturnType<typeof quickClassifyMessage>): MiraUnderstandOutput {
   return {
     role: mapQuickRoleToMiraRole(quick.role),
@@ -175,6 +205,54 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
     return { conversationId: conversation.id, traceId: ctx.traceId, replyText: refusal, sent };
   }
 
+  // Decline-reason-reply gate (Mira Pass 1 spec s.12): a customer who was
+  // just asked why they declined a match is answering that question, not
+  // starting a fresh intent — checked before the Sapar confirmation-gate so
+  // the answer is captured once and Mira never re-asks. The correlation
+  // lives in MiraConversation.collectedFields.pendingDeclineMatchId (set by
+  // handleMiraMatchDecision below), never a new Match/TripRequest schema
+  // field.
+  const collectedFields = conversation.collectedFields as MiraNormalizedFields | null;
+  const pendingDeclineMatchId = collectedFields?.pendingDeclineMatchId ?? null;
+  if (pendingDeclineMatchId) {
+    const classification = classifyDeclineReasonText(params.text);
+    await db.match.update({
+      where: { id: pendingDeclineMatchId },
+      data: {
+        declineReason: classification.freeText
+          ? `${classification.category}: ${classification.freeText}`
+          : classification.category,
+      },
+    });
+    await appendUserMessage(conversation.id, {
+      rawText: params.text,
+      detectedLanguage: detection.language,
+      languageConfidence: detection.confidence,
+      traceId: ctx.traceId,
+    });
+    const ackReply = composeDeclineReasonAcknowledgement(detection.language);
+    const sent = await sendReply(params.channel, params.senderId, ackReply);
+    await appendMiraMessage(conversation.id, ackReply, ctx.traceId);
+    await updateConversationState(conversation.id, {
+      detectedLanguage: detection.language,
+      status: "ACTIVE",
+      activeIntent: null,
+      collectedFields: { pendingDeclineMatchId: null },
+      lastAgentDecision: "mira_decline_reason_captured",
+      lastTraceId: ctx.traceId,
+      activeSpecialist: "MIRA",
+    });
+    await logAgentAction({
+      ctx,
+      agent: "MIRA",
+      action: "MIRA_DECLINE_REASON_CAPTURED",
+      entityType: "MiraConversation",
+      entityId: conversation.id,
+      details: { matchId: pendingDeclineMatchId, category: classification.category, sent },
+    });
+    return { conversationId: conversation.id, traceId: ctx.traceId, replyText: ackReply, sent };
+  }
+
   // Confirmation-gate short-circuit (AGENTS hardening spec s.3/s.4/s.32): a
   // shipment sitting at AWAITING_CONFIRMATION expects a yes/no-shaped reply,
   // not a fresh NLU pass — checked before the Jolchu/Sapar routing gates so
@@ -204,7 +282,11 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
         confirmationIntent === "CONFIRM"
           ? await confirmShipmentQuote(ctx, pendingConfirmation.id)
           : await rejectShipmentQuote(ctx, pendingConfirmation.id, {});
-      const saparReply = composeSaparReply(saparResult, detection.language);
+      const wasFirstHandoffToSapar = conversation.activeSpecialist !== "SAPAR";
+      const saparOwnsNext = saparStillOwnsConversation(saparResult.status);
+      const saparReply = wasFirstHandoffToSapar
+        ? `${introduceSaparLine(detection.language)}\n\n${composeSaparReply(saparResult, detection.language)}`
+        : composeSaparReply(saparResult, detection.language);
       const sent = await sendReply(params.channel, params.senderId, saparReply);
       await appendMiraMessage(conversation.id, saparReply, ctx.traceId);
       await updateConversationState(conversation.id, {
@@ -216,6 +298,7 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
         missingFields: saparResult.missingFields,
         lastAgentDecision: `sapar_${saparResult.status.toLowerCase()}`,
         lastTraceId: ctx.traceId,
+        activeSpecialist: saparOwnsNext ? "SAPAR" : "MIRA",
       });
       await logAgentAction({
         ctx,
@@ -229,6 +312,7 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
           shipmentId: saparResult.shipmentId,
           intent: confirmationIntent,
           status: saparResult.status,
+          cargoLeadStage: deriveCargoLeadStage(saparResult.status),
           sent,
         },
       });
@@ -305,6 +389,88 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
     },
   });
 
+  // Top-intent gate (Mira Pass 1 spec s.2/s.21): complaint/finance/partner
+  // messages are acknowledged here and never handed to RT Command's
+  // trip-request extractor, which has no notion of any of the three.
+  // Mirrors the injection-detection and Sapar-gate shape: detect, handle,
+  // reply, return early. A complaint is routed to Adilet (the independent
+  // arbitrator) rather than resolved by Mira herself.
+  const topIntent = classifyMiraTopIntent(params.text);
+  await logAgentAction({
+    ctx,
+    agent: "MIRA",
+    action: "mira.top_intent_classified",
+    entityType: "MiraConversation",
+    entityId: conversation.id,
+    details: { intent: topIntent.intent, confidence: topIntent.confidence, matchedSignals: topIntent.matchedSignals },
+  });
+
+  if (topIntent.intent === "complaint_dispute") {
+    const adiletCase = await openCase(
+      ctx,
+      {
+        caseType: "CUSTOMER_COMPLAINT",
+        sourceAgent: "MIRA",
+        openedByType: "AGENT",
+        summary: "Passenger-reported complaint captured via Mira",
+        allegation: params.text,
+        managerContext: `Mira conversation ${conversation.id}, channel ${params.channel}, sender ${params.senderId}`,
+        sourceEventKey: `mira_complaint_${conversation.id}_${params.rawMessageId ?? ctx.traceId}`,
+      },
+    );
+    // adilet/bridge.ts's clientFacingSummary is explicitly documented as
+    // "the only thing Mira may ever relay to a client" — reused verbatim
+    // rather than a second, parallel status-to-text mapping inside Mira.
+    const complaintReply = clientFacingSummary(adiletCase.id, adiletCase.status).neutralMessage;
+    const sent = await sendReply(params.channel, params.senderId, complaintReply);
+    await appendMiraMessage(conversation.id, complaintReply, ctx.traceId);
+    await updateConversationState(conversation.id, {
+      detectedLanguage: detection.language,
+      status: "ACTIVE",
+      activeIntent: "complaint_dispute",
+      lastAgentDecision: "mira_complaint_routed_to_adilet",
+      lastTraceId: ctx.traceId,
+      activeSpecialist: "MIRA",
+    });
+    await logAgentAction({
+      ctx,
+      agent: "MIRA",
+      action: "MIRA_COMPLAINT_ROUTED_TO_ADILET",
+      entityType: "MiraConversation",
+      entityId: conversation.id,
+      details: { channel: params.channel, senderId: params.senderId, sent },
+    });
+    return { conversationId: conversation.id, traceId: ctx.traceId, replyText: complaintReply, sent };
+  }
+
+  if (topIntent.intent === "finance_payment" || topIntent.intent === "partner_business") {
+    // Acknowledge only — no payment action, no cashier behavior, no RT
+    // OFFICE routing (neither exists yet; spec s.18/s.7).
+    const ackReply =
+      topIntent.intent === "finance_payment"
+        ? composeFinanceAcknowledgement(detection.language)
+        : composePartnerAcknowledgement(detection.language);
+    const sent = await sendReply(params.channel, params.senderId, ackReply);
+    await appendMiraMessage(conversation.id, ackReply, ctx.traceId);
+    await updateConversationState(conversation.id, {
+      detectedLanguage: detection.language,
+      status: "ACTIVE",
+      activeIntent: topIntent.intent,
+      lastAgentDecision: `mira_${topIntent.intent}_acknowledged`,
+      lastTraceId: ctx.traceId,
+      activeSpecialist: "MIRA",
+    });
+    await logAgentAction({
+      ctx,
+      agent: "MIRA",
+      action: topIntent.intent === "finance_payment" ? "MIRA_FINANCE_INQUIRY_TAGGED" : "MIRA_PARTNER_INQUIRY_TAGGED",
+      entityType: "MiraConversation",
+      entityId: conversation.id,
+      details: { channel: params.channel, senderId: params.senderId, sent },
+    });
+    return { conversationId: conversation.id, traceId: ctx.traceId, replyText: ackReply, sent };
+  }
+
   const jolchuDecision = decideJolchuRouting(params.text);
   await logAgentAction({
     ctx,
@@ -354,6 +520,7 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
   });
 
   if (saparDecision.required) {
+    const wasFirstHandoffToSapar = conversation.activeSpecialist !== "SAPAR";
     const saparResult = await handleSaparInbound({
       channel,
       language: detection.language,
@@ -366,7 +533,13 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
     // word choice around a price/ETA/executor fact is unacceptable here
     // (AGENTS spec s.40), unlike RT Command's reply below where the facts
     // being paraphrased are looser (situation summaries, not numbers).
-    const saparReply = composeSaparReply(saparResult, detection.language);
+    // Mira Pass 1 spec s.3 — the first time a conversation is handed to
+    // Sapar, introduce him visibly in this same chat rather than silently
+    // switching voice; on later turns he already owns the thread.
+    const saparOwnsNext = saparStillOwnsConversation(saparResult.status);
+    const saparReply = wasFirstHandoffToSapar
+      ? `${introduceSaparLine(detection.language)}\n\n${composeSaparReply(saparResult, detection.language)}`
+      : composeSaparReply(saparResult, detection.language);
     const sent = await sendReply(params.channel, params.senderId, saparReply);
     await appendMiraMessage(conversation.id, saparReply, ctx.traceId);
     await updateConversationState(conversation.id, {
@@ -378,6 +551,7 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
       missingFields: saparResult.missingFields,
       lastAgentDecision: `sapar_${saparResult.status.toLowerCase()}`,
       lastTraceId: ctx.traceId,
+      activeSpecialist: saparOwnsNext ? "SAPAR" : "MIRA",
     });
     await logAgentAction({
       ctx,
@@ -385,9 +559,49 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
       action: "MIRA_SAPAR_HANDLED",
       entityType: "MiraConversation",
       entityId: conversation.id,
-      details: { channel: params.channel, senderId: params.senderId, shipmentId: saparResult.shipmentId, status: saparResult.status, sent },
+      details: {
+        channel: params.channel,
+        senderId: params.senderId,
+        shipmentId: saparResult.shipmentId,
+        status: saparResult.status,
+        cargoLeadStage: deriveCargoLeadStage(saparResult.status),
+        sent,
+      },
     });
     return { conversationId: conversation.id, traceId: ctx.traceId, replyText: saparReply, sent };
+  }
+
+  // Baggage-policy gate (Mira Pass 1 spec s.13-s.17): a personal-baggage
+  // weight mention reaching this point in the flow is presumptively
+  // passenger luggage, not cargo — the Sapar gate above already diverted any
+  // genuine cargo/parcel text. isLikelyCargoNotBaggage still gets the final
+  // say (spec s.17: never decided from weight alone). RT's own
+  // significant-excess fee is recorded as a typed financial intent
+  // (passenger-finance.ts) and explained to the customer alongside whatever
+  // reply RT Command produces below — never in place of it.
+  const baggageWeightKg = extractBaggageWeightKg(params.text);
+  let baggageNote: string | null = null;
+  if (baggageWeightKg !== null && !isLikelyCargoNotBaggage({ weightKg: baggageWeightKg, text: params.text })) {
+    const baggageTier = classifyBaggageWeight(baggageWeightKg);
+    const baggageCharges = resolveBaggageCharges(baggageTier, null);
+    await logAgentAction({
+      ctx,
+      agent: "MIRA",
+      action: "mira.baggage_gate",
+      entityType: "MiraConversation",
+      entityId: conversation.id,
+      details: { weightKg: baggageWeightKg, tier: baggageTier, rtExtraBaggageFeeSom: baggageCharges.rtExtraBaggageFeeSom },
+    });
+    if (baggageTier === "SIGNIFICANT_EXCESS") {
+      const financialIntent = buildSignificantExcessBaggageFinancialIntent({
+        conversationId: conversation.id,
+        customerRef: params.senderId,
+        amountSom: baggageCharges.rtExtraBaggageFeeSom,
+        eventKey: params.rawMessageId ?? ctx.traceId,
+      });
+      await recordPassengerFinancialIntent(ctx, financialIntent);
+      baggageNote = composeBaggageExcessNote(detection.language, baggageCharges.rtExtraBaggageFeeSom);
+    }
   }
 
   const commandResult = await handleInboundMessage({
@@ -435,6 +649,10 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
     });
   }
 
+  if (baggageNote) {
+    replyText = `${replyText}\n\n${baggageNote}`;
+  }
+
   const sent = await sendReply(params.channel, params.senderId, replyText);
   await appendMiraMessage(conversation.id, replyText, ctx.traceId);
 
@@ -447,7 +665,19 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
     missingFields: understanding.uncertainties,
     lastAgentDecision: commandResult.outcome,
     lastTraceId: commandResult.traceId,
+    // RT Command handled this turn directly (not Sapar), so control is back
+    // with Mira — explicit even if the conversation was never handed off.
+    activeSpecialist: "MIRA",
   });
+
+  // Passenger lead-lifecycle labeling (Mira Pass 1 spec s.11): only claimed
+  // when commandResult.data has actually been checked to carry a real
+  // RequestStatus (isTripRequestLike) — never a blind cast into the
+  // outcome's unknown-typed data field.
+  const passengerLeadStage =
+    commandResult.outcome === "trip_request_created" && isTripRequestLike(commandResult.data)
+      ? deriveLeadStage({ requestStatus: commandResult.data.status })
+      : null;
 
   await logAgentAction({
     ctx,
@@ -459,6 +689,7 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
       channel: params.channel,
       senderId: params.senderId,
       commandOutcome: commandResult.outcome,
+      passengerLeadStage,
       sent,
       jolchu: jolchuResult
         ? {
@@ -473,4 +704,95 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
   });
 
   return { conversationId: conversation.id, traceId: ctx.traceId, replyText, sent };
+}
+
+export interface MiraMatchDecisionParams {
+  channel: Extract<InboundChannel, "WHATSAPP" | "TELEGRAM_BOT">;
+  senderId: string;
+  matchId: string;
+  accepted: boolean;
+  rawMessageId?: string;
+}
+
+/** Routes a passenger's confirm/decline WhatsApp button reply through Mira
+ * (Mira Pass 1 spec s.12/s.24, FINAL WIRING pass): Mira is RT's single
+ * external ingress layer, so a button reply must preserve the same
+ * conversation/audit/lead-lifecycle path as a normal inbound text message,
+ * not bypass it. Reuses handlePassengerResponse verbatim for the actual
+ * Match/TripRequest state transition, driver notification, and re-matching
+ * — this function only owns Mira's own conversation state and, on decline,
+ * the ask-once decline-reason prompt. The matchId<->conversation
+ * correlation needed for the customer's next free-text reply lives in
+ * MiraConversation.collectedFields (existing Json column), never a new
+ * Match/TripRequest schema field. */
+export async function handleMiraMatchDecision(params: MiraMatchDecisionParams): Promise<MiraInboundResult> {
+  const ctx = rootContext();
+  const channel: Channel = params.channel;
+  const conversation = await getOrCreateActiveConversation(channel, params.senderId);
+  const language = conversation.detectedLanguage ?? "RU";
+
+  const match = await handlePassengerResponse(params.matchId, params.accepted);
+
+  await logAgentAction({
+    ctx,
+    agent: "MIRA",
+    action: "MIRA_MATCH_DECISION_HANDLED",
+    entityType: "MiraConversation",
+    entityId: conversation.id,
+    details: { channel: params.channel, senderId: params.senderId, matchId: params.matchId, accepted: params.accepted, matchStatus: match.status },
+  });
+
+  if (params.accepted) {
+    // handlePassengerResponse already sent the passenger-facing confirmation
+    // (contact reveal via revealContacts) — a second Mira reply here would
+    // duplicate that message, not add to it.
+    await updateConversationState(conversation.id, {
+      status: "ACTIVE",
+      activeIntent: "match_confirmed",
+      lastAgentDecision: "mira_match_confirmed",
+      lastTraceId: ctx.traceId,
+      activeSpecialist: "MIRA",
+    });
+    return { conversationId: conversation.id, traceId: ctx.traceId, replyText: "", sent: false };
+  }
+
+  const collectedFields = conversation.collectedFields as MiraNormalizedFields | null;
+  const declineFlags: DeclineReasonConversationFlags = { declineReasonAsked: Boolean(collectedFields?.pendingDeclineMatchId) };
+  if (!shouldAskDeclineReason(declineFlags)) {
+    // Already waiting on an earlier decline-reason answer — never overwrite
+    // that pending correlation or ask twice (spec s.12: never re-ask).
+    await logAgentAction({
+      ctx,
+      agent: "MIRA",
+      action: "MIRA_DECLINE_REASON_SKIPPED_ALREADY_PENDING",
+      entityType: "MiraConversation",
+      entityId: conversation.id,
+      details: { matchId: params.matchId, existingPendingMatchId: collectedFields?.pendingDeclineMatchId },
+    });
+    return { conversationId: conversation.id, traceId: ctx.traceId, replyText: "", sent: false };
+  }
+
+  // handlePassengerResponse does not message the passenger on decline (only
+  // the driver) — Mira owns the passenger-facing side, including the
+  // ask-once decline-reason prompt.
+  const declineReasonPrompt = buildDeclineReasonPrompt(language);
+  const sent = await sendReply(params.channel, params.senderId, declineReasonPrompt);
+  await appendMiraMessage(conversation.id, declineReasonPrompt, ctx.traceId);
+  await updateConversationState(conversation.id, {
+    status: "AWAITING_USER",
+    activeIntent: "decline_reason_followup",
+    collectedFields: { pendingDeclineMatchId: params.matchId },
+    lastAgentDecision: "mira_decline_reason_asked",
+    lastTraceId: ctx.traceId,
+    activeSpecialist: "MIRA",
+  });
+  await logAgentAction({
+    ctx,
+    agent: "MIRA",
+    action: "MIRA_DECLINE_REASON_ASKED",
+    entityType: "MiraConversation",
+    entityId: conversation.id,
+    details: { channel: params.channel, senderId: params.senderId, matchId: params.matchId, sent },
+  });
+  return { conversationId: conversation.id, traceId: ctx.traceId, replyText: declineReasonPrompt, sent };
 }

@@ -78,6 +78,9 @@ export async function updateConversationState(
     missingFields?: string[];
     lastAgentDecision?: string | null;
     lastTraceId?: string | null;
+    /** "MIRA" | "SAPAR" | a future specialist name — see the schema comment
+     * on MiraConversation.activeSpecialist (Mira Pass 1 spec s.3). */
+    activeSpecialist?: string;
   },
 ) {
   return db.miraConversation.update({
@@ -91,6 +94,7 @@ export async function updateConversationState(
       missingFields: params.missingFields,
       lastAgentDecision: params.lastAgentDecision,
       lastTraceId: params.lastTraceId,
+      activeSpecialist: params.activeSpecialist,
     },
   });
 }

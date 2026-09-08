@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { parseWhatsAppWebhookPayload, verifyWhatsAppWebhook } from "@/lib/messaging/whatsapp";
-import { handleMiraInbound } from "@/lib/mira/orchestrator";
-import { handlePassengerResponse } from "@/lib/matching/orchestrate";
+import { handleMiraInbound, handleMiraMatchDecision } from "@/lib/mira/orchestrator";
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
@@ -25,7 +24,13 @@ export async function POST(req: NextRequest) {
   for (const reply of buttonReplies) {
     const [role, action, matchId] = reply.buttonId.split(":");
     if (role === "passenger" && (action === "confirm" || action === "decline")) {
-      await handlePassengerResponse(matchId, action === "confirm");
+      await handleMiraMatchDecision({
+        channel: "WHATSAPP",
+        senderId: reply.from,
+        matchId,
+        accepted: action === "confirm",
+        rawMessageId: reply.messageId,
+      });
     }
   }
 

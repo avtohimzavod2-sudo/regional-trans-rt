@@ -5,7 +5,7 @@
 // verify itself), so this module's only job is composing Sapar's outward
 // reply from a SaparResult without ever inventing a fact SaparResult didn't
 // actually contain — mirrors reply-templates.ts's role for RT Command.
-import type { Language } from "@prisma/client";
+import type { Language, ShipmentStatus } from "@prisma/client";
 import type { RequiredShipmentField, SaparResult } from "@/lib/sapar/types";
 
 const FIELD_QUESTION: Record<RequiredShipmentField, Record<Language, string>> = {
@@ -209,6 +209,43 @@ function bookedReply(result: SaparResult, language: Language): string {
   }
 
   return parts.join(" ");
+}
+
+// Statuses where Sapar is still actively working the order with the
+// customer inside the same chat — the ones after this (execution/terminal
+// phase, e.g. AWAITING_PICKUP onward, or CANCELLED/FAILED) hand the turn
+// back to Mira (Mira Pass 1 spec s.3's active_specialist concept, built
+// directly on Sapar's own existing ShipmentStatus rather than a second,
+// duplicate state machine).
+const SAPAR_OWNED_STATUSES: ReadonlySet<ShipmentStatus> = new Set([
+  "NEEDS_INFO",
+  "READY_FOR_MATCHING",
+  "SEARCHING",
+  "QUOTED",
+  "AWAITING_CONFIRMATION",
+  "CONFIRMED",
+]);
+
+/** Whether Sapar still owns this conversation's next turn, derived from the
+ * shipment's own status — see SAPAR_OWNED_STATUSES above. */
+export function saparStillOwnsConversation(status: ShipmentStatus): boolean {
+  return SAPAR_OWNED_STATUSES.has(status);
+}
+
+const INTRODUCE_SAPAR_LINE: Record<Language, string> = {
+  KY: "Жүк маселеси боюнча RT'нин жүк адиси Сапарды ушул эле сүйлөшүүгө чакырдым, ал андан ары жардам берет.",
+  RU: "По вопросу доставки подключаю к этому же чату Сапара — нашего специалиста по грузам, он поможет дальше.",
+  EN: "For the delivery, I'm bringing Sapar — RT's cargo specialist — into this same chat; he'll take it from here.",
+};
+
+/** The one-time, visible "I'm inviting a specialist into this chat" line
+ * (spec s.3/s.24-D: "Mira introduces Sapar visibly"). Callers prepend this
+ * to composeSaparReply's output only on the turn where activeSpecialist
+ * actually transitions MIRA -> SAPAR — never on every subsequent turn, so
+ * the customer is never re-introduced to someone already in the
+ * conversation. */
+export function introduceSaparLine(language: Language): string {
+  return INTRODUCE_SAPAR_LINE[language] ?? INTRODUCE_SAPAR_LINE.RU;
 }
 
 /** Deterministic Sapar reply text — never empty, never invents a fact

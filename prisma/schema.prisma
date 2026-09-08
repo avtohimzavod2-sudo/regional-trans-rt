@@ -639,6 +639,15 @@ model MiraConversation {
   detectedLanguage  Language?
   status            MiraConversationStatus @default(ACTIVE)
   activeIntent      String?
+  // Mira Pass 1 spec s.3 — conversation_host is always MIRA by construction
+  // (she is the only module that ever calls sendReply/sendTelegramMessage/
+  // sendWhatsAppText, see src/lib/mira/sapar-bridge.ts) and is therefore not
+  // its own stored field. activeSpecialist is the one piece of state that
+  // does need to persist: which specialist currently owns this turn inside
+  // the same chat/thread — "MIRA" or "SAPAR" today, a future specialist name
+  // later. A free string (not a closed enum) so onboarding a new specialist
+  // never requires a migration here.
+  activeSpecialist String @default("MIRA")
   collectedFields   Json? // fields Mira has extracted so far (route, date, seats, ...)
   missingFields     String[] // field names still needed before COMMAND can act
   confirmedFields   Json? // fields the user has explicitly confirmed

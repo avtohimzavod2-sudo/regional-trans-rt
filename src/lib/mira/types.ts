@@ -37,6 +37,11 @@ export interface MiraNormalizedFields {
   returnRoute?: boolean | null;
   lastMile?: boolean | null;
   notes?: string | null;
+  // Mira Pass 1 spec s.12 — correlates a passenger's pending WhatsApp button
+  // decline back to its Match row for the next free-text reply, without a
+  // new Match/TripRequest schema field (reuses this existing Json column
+  // instead, per spec s.23: prefer EXTEND/REUSE over a new model/column).
+  pendingDeclineMatchId?: string | null;
 }
 
 export const REQUIRED_FIELDS_BY_ROLE: Record<string, (keyof MiraNormalizedFields)[]> = {
