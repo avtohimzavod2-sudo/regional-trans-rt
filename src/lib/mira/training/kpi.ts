@@ -22,6 +22,12 @@ export interface KpiSummary {
   dateTimeAccuracy: number | null;
   seatAccuracy: number | null;
   phoneAccuracy: number | null;
+  /** Informational only — not part of KPI_THRESHOLDS/meetsThresholds yet,
+   * since language/clarification/routing coverage across the benchmark is
+   * still growing case by case. Surfaced for the certification report. */
+  languageAccuracy: number | null;
+  clarificationAccuracy: number | null;
+  routingAccuracy: number | null;
   hallucinationCount: number;
   hallucinationRate: number;
   overallScore: number | null;
@@ -45,6 +51,12 @@ export function computeKpiSummary(scores: CaseScoreResult[]): KpiSummary {
   let seatsCorrect = 0;
   let phoneApplicable = 0;
   let phoneCorrect = 0;
+  let languageApplicable = 0;
+  let languageCorrect = 0;
+  let clarificationApplicable = 0;
+  let clarificationCorrect = 0;
+  let routingApplicable = 0;
+  let routingCorrect = 0;
   let hallucinationCount = 0;
 
   for (const s of scores) {
@@ -68,6 +80,18 @@ export function computeKpiSummary(scores: CaseScoreResult[]): KpiSummary {
       phoneApplicable++;
       if (s.phoneCorrect) phoneCorrect++;
     }
+    if (s.languageApplicable) {
+      languageApplicable++;
+      if (s.languageCorrect) languageCorrect++;
+    }
+    if (s.clarificationApplicable) {
+      clarificationApplicable++;
+      if (s.clarificationCorrect) clarificationCorrect++;
+    }
+    if (s.routingApplicable) {
+      routingApplicable++;
+      if (s.routingCorrect) routingCorrect++;
+    }
     if (s.hallucinated) hallucinationCount++;
   }
 
@@ -79,6 +103,9 @@ export function computeKpiSummary(scores: CaseScoreResult[]): KpiSummary {
     dateTimeAccuracy: accuracy(dateTimeApplicable, dateTimeCorrect),
     seatAccuracy: accuracy(seatsApplicable, seatsCorrect),
     phoneAccuracy: accuracy(phoneApplicable, phoneCorrect),
+    languageAccuracy: accuracy(languageApplicable, languageCorrect),
+    clarificationAccuracy: accuracy(clarificationApplicable, clarificationCorrect),
+    routingAccuracy: accuracy(routingApplicable, routingCorrect),
     hallucinationCount,
     hallucinationRate: totalCases === 0 ? 0 : hallucinationCount / totalCases,
     overallScore: totalCases === 0 ? null : passedCases / totalCases,

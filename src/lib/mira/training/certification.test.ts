@@ -19,6 +19,10 @@ function perfectScore(code: string): CaseScoreResult {
     seatsCorrect: true,
     phoneApplicable: true,
     phoneCorrect: true,
+    clarificationApplicable: true,
+    clarificationCorrect: true,
+    routingApplicable: true,
+    routingCorrect: true,
     hallucinated: false,
     failureCategories: [],
   };

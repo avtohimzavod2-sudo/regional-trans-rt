@@ -23,6 +23,7 @@ import {
   updateConversationState,
 } from "./session";
 import { checkSafety, detectInjectionAttempt, safetyRefusalText } from "./safety";
+import { detectUnverifiedClaims } from "./honesty";
 import {
   composeBaggageExcessNote,
   composeDeclineReasonAcknowledgement,
@@ -31,7 +32,7 @@ import {
   composePartnerAcknowledgement,
   situationForOutcome,
 } from "./reply-templates";
-import { mapQuickRoleToMiraRole } from "./types";
+import { mapQuickRoleToMiraRole, mergeMiraNormalizedFields } from "./types";
 import type { MiraNormalizedFields } from "./types";
 import { classifyBaggageWeight, extractBaggageWeightKg, isLikelyCargoNotBaggage, resolveBaggageCharges } from "./baggage-policy";
 import { buildSignificantExcessBaggageFinancialIntent, recordPassengerFinancialIntent } from "./passenger-finance";
@@ -626,7 +627,13 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
       conversationContext,
     });
     const safety = checkSafety(params.text, replyOut.text);
-    replyText = safety.safe && replyOut.text.trim().length > 0 ? replyOut.text : fallbackReply;
+    // Mira Pass 1 spec s.6 — a free-generated reply must never assert a
+    // price/seats/booking/payment/phone/vehicle/RT-Point fact orchestrator.ts
+    // did not itself verify. No knownFacts are passed here since this pass
+    // has no verified-fact channel into the reply yet; any such claim falls
+    // back to the deterministic, backend-derived template instead.
+    const honesty = detectUnverifiedClaims(replyOut.text);
+    replyText = safety.safe && honesty.safe && replyOut.text.trim().length > 0 ? replyOut.text : fallbackReply;
     await logProviderCall({
       provider: provider.providerName,
       model: provider.modelId,
@@ -661,7 +668,11 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
     detectedLanguage: detection.language,
     status: commandResult.outcome === "unrecognized" ? "AWAITING_USER" : "ACTIVE",
     activeIntent: understanding.intent,
-    collectedFields: understanding.entities,
+    // Merge, not overwrite: a multi-turn request ("...эртен кетем" -> "эки
+    // киши" -> "саат 8ден кийин") must accumulate into one collected-fields
+    // object rather than each turn discarding what the previous turn already
+    // captured (Mira Pass 1 spec s.7 continuity requirement).
+    collectedFields: mergeMiraNormalizedFields(collectedFields, understanding.entities),
     missingFields: understanding.uncertainties,
     lastAgentDecision: commandResult.outcome,
     lastTraceId: commandResult.traceId,

@@ -53,6 +53,78 @@ const understandSchema = z.object({
   clarificationQuestion: z.string().nullable().describe("One short natural question, in the user's language, or null"),
 });
 
+type UnderstandObject = z.infer<typeof understandSchema>;
+
+/** Thrown when a schema-shaped model response is still semantically
+ * malformed (e.g. claims clarification is needed but supplies no question).
+ * orchestrator.ts's existing try/catch around provider.understand() already
+ * treats any thrown error as "fall back to fastLayerUnderstanding" — this
+ * class exists only so that fallback path, and tests, can tell a validation
+ * rejection apart from a network/API failure. */
+export class MiraProviderValidationError extends Error {
+  readonly reasons: string[];
+  constructor(reasons: string[]) {
+    super(`Gemini understand() output failed semantic validation: ${reasons.join("; ")}`);
+    this.name = "MiraProviderValidationError";
+    this.reasons = reasons;
+  }
+}
+
+const NON_EMPTY_STRING_FIELDS = [
+  "from",
+  "to",
+  "pickup",
+  "dropOff",
+  "phone",
+  "car",
+  "plate",
+  "luggage",
+  "parcel",
+  "notes",
+] as const satisfies readonly (keyof UnderstandObject)[];
+
+const NON_NEGATIVE_NUMBER_FIELDS = [
+  "passengerCount",
+  "seatsAvailable",
+  "seatsRequired",
+  "price",
+] as const satisfies readonly (keyof UnderstandObject)[];
+
+/** Semantic validation `generateObject`'s own zod parsing cannot express —
+ * shape-valid but content-invalid combinations that must never reach
+ * MiraConversation state. Pure and synchronous so it is independently unit
+ * testable without a live model call. Throws MiraProviderValidationError on
+ * the first batch of problems found; never mutates `object`. */
+export function validateUnderstandObject(object: UnderstandObject): void {
+  const reasons: string[] = [];
+
+  if (object.requiresClarification && !object.clarificationQuestion?.trim()) {
+    reasons.push("requiresClarification is true but clarificationQuestion is empty/null");
+  }
+  if (!object.requiresClarification && object.clarificationQuestion?.trim()) {
+    reasons.push("requiresClarification is false but a clarificationQuestion was supplied");
+  }
+  if (!object.intent.trim()) {
+    reasons.push("intent is empty");
+  }
+  for (const field of NON_EMPTY_STRING_FIELDS) {
+    const value = object[field];
+    if (typeof value === "string" && value.trim() === "") {
+      reasons.push(`${field} is an empty string (must be null, not "")`);
+    }
+  }
+  for (const field of NON_NEGATIVE_NUMBER_FIELDS) {
+    const value = object[field];
+    if (typeof value === "number" && value < 0) {
+      reasons.push(`${field} is negative (${value})`);
+    }
+  }
+
+  if (reasons.length > 0) {
+    throw new MiraProviderValidationError(reasons);
+  }
+}
+
 function requireApiKey(): string {
   const key = process.env.MIRA_GEMINI_API_KEY;
   if (!key) {
@@ -108,6 +180,13 @@ export class GoogleGeminiMiraProvider implements MiraModelProvider {
         .join("\n"),
       prompt: input.text,
     });
+
+    // Reject malformed structured output safely: schema-shaped but
+    // semantically inconsistent output must never be written into RT state.
+    // Throwing here is caught by orchestrator.ts's existing understand()
+    // try/catch, which falls back to fastLayerUnderstanding — same as any
+    // other provider failure.
+    validateUnderstandObject(object);
 
     const entities: MiraNormalizedFields = {
       from: object.from,

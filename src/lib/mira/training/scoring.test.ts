@@ -10,6 +10,8 @@ describe("scoreCase — ordinary cases", () => {
       role: "DRIVER",
       language: "KY",
       normalizedData: { from: "BISHKEK", to: "KARAKOL", date: "TOMORROW", time: "07:00", seatsAvailable: 3 },
+      requiresClarification: false,
+      routingTarget: "driver",
     };
     const score = scoreCase(litCase, actual);
     expect(score.passed).toBe(true);
@@ -48,6 +50,8 @@ describe("scoreCase — ordinary cases", () => {
       role: "PASSENGER",
       language: "KY",
       normalizedData: { from: "BISHKEK", to: "OSH", date: "TOMORROW", phone: "0555123456" },
+      requiresClarification: false,
+      routingTarget: "passenger_trip",
     };
     const score = scoreCase(phoneCase, actual);
     expect(score.seatsApplicable).toBe(false);
@@ -68,6 +72,50 @@ describe("scoreCase — ordinary cases", () => {
       },
     };
     const score = scoreCase(litCase, actual);
+    expect(score.hallucinated).toBe(true);
+    expect(score.passed).toBe(false);
+    expect(score.failureCategories).toContain("HALLUCINATION");
+  });
+
+  it("fails and records CLARIFICATION when the clarification flag doesn't match", () => {
+    const clarifyCase = getBenchmarkCase("CLARIFY-001")!;
+    const actual: ActualCaseOutput = {
+      role: "PASSENGER",
+      language: "KY",
+      normalizedData: { to: "OSH" },
+      requiresClarification: false,
+      routingTarget: "passenger_trip",
+    };
+    const score = scoreCase(clarifyCase, actual);
+    expect(score.clarificationApplicable).toBe(true);
+    expect(score.clarificationCorrect).toBe(false);
+    expect(score.passed).toBe(false);
+    expect(score.failureCategories).toContain("CLARIFICATION");
+  });
+
+  it("fails and records ROUTING when the routing target doesn't match", () => {
+    const parcelCase = getBenchmarkCase("PARCEL-001")!;
+    const actual: ActualCaseOutput = {
+      role: "PARCEL_SENDER",
+      language: "KY",
+      normalizedData: { from: "BISHKEK", to: "NARYN", date: "TOMORROW" },
+      routingTarget: "passenger_trip",
+    };
+    const score = scoreCase(parcelCase, actual);
+    expect(score.routingApplicable).toBe(true);
+    expect(score.routingCorrect).toBe(false);
+    expect(score.passed).toBe(false);
+    expect(score.failureCategories).toContain("ROUTING");
+  });
+
+  it("flags HALLUCINATION for a case-specific fieldsMustNotBeHallucinated field", () => {
+    const shortCase = getBenchmarkCase("SHORT-FRAGMENT-001")!;
+    const actual: ActualCaseOutput = {
+      language: "KY",
+      normalizedData: { to: "OSH", date: "TOMORROW", passengerCount: 2 },
+      requiresClarification: true,
+    };
+    const score = scoreCase(shortCase, actual);
     expect(score.hallucinated).toBe(true);
     expect(score.passed).toBe(false);
     expect(score.failureCategories).toContain("HALLUCINATION");

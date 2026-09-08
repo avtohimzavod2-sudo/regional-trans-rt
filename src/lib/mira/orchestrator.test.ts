@@ -312,6 +312,22 @@ describe("handleMiraInbound — RT Command fallback (plain passenger text)", () 
     expect(result.replyText.length).toBeGreaterThan(0);
     expect(result.sent).toBe(true);
   });
+
+  it("falls back to the deterministic template reply if the provider invents an unverified fact (spec s.6 honesty guard)", async () => {
+    sessionMocks.getOrCreateActiveConversation.mockResolvedValue(conversationFixture("MIRA"));
+    handleInboundMessageMock.mockResolvedValue({
+      traceId: "cmd_trace_1",
+      routedTo: ["COMMAND"],
+      outcome: "trip_request_created",
+    } satisfies CommandResult);
+    providerReplyMock.mockResolvedValue({ text: "Водитель найден, цена поездки 500 сом, оплата получена." });
+
+    const result = await handleMiraInbound({ ...BASE_PARAMS, text: "Бишкектен Ошко 2 орун" });
+
+    expect(result.replyText).not.toContain("500 сом");
+    expect(result.replyText).not.toContain("Водитель найден");
+    expect(result.replyText.length).toBeGreaterThan(0);
+  });
 });
 
 describe("handleMiraInbound — baggage-policy + passenger-finance gate (Mira Pass 1 spec s.13-s.20, FINAL WIRING pass)", () => {
@@ -554,5 +570,118 @@ describe("handleMiraInbound — injection gate", () => {
     expect(handleSaparInboundMock).not.toHaveBeenCalled();
     expect(openCaseMock).not.toHaveBeenCalled();
     expect(logAgentActionMock).toHaveBeenCalledWith(expect.objectContaining({ action: "mira.injection_attempt_blocked" }));
+  });
+});
+
+// Mira Pass 1 spec s.7 — new information from a later turn must accumulate
+// into MiraConversation.collectedFields, never overwrite what an earlier
+// turn already captured. Each case below sets `collectedFields` on the
+// fixture to what a prior turn would already have persisted, then checks
+// what this turn's updateConversationState call merges it into.
+describe("handleMiraInbound — conversation continuity (Mira Pass 1 spec s.7)", () => {
+  beforeEach(() => {
+    handleInboundMessageMock.mockResolvedValue({
+      traceId: "cmd_trace_1",
+      routedTo: ["COMMAND"],
+      outcome: "unrecognized",
+    } satisfies CommandResult);
+  });
+
+  it("merges a second turn's fields into the first turn's already-collected fields", async () => {
+    sessionMocks.getOrCreateActiveConversation.mockResolvedValue(
+      conversationFixture("MIRA", { collectedFields: { from: "BISHKEK", to: "KARAKOL", date: "TOMORROW" } }),
+    );
+    providerUnderstandMock.mockResolvedValue({
+      ...PASSIVE_UNDERSTANDING,
+      entities: { passengerCount: 2 },
+    });
+
+    await handleMiraInbound({ ...BASE_PARAMS, text: "эки киши" });
+
+    expect(sessionMocks.updateConversationState).toHaveBeenCalledWith(
+      "conv_1",
+      expect.objectContaining({
+        collectedFields: { from: "BISHKEK", to: "KARAKOL", date: "TOMORROW", passengerCount: 2 },
+      }),
+    );
+  });
+
+  it("lets a later turn correct a previously collected destination", async () => {
+    sessionMocks.getOrCreateActiveConversation.mockResolvedValue(
+      conversationFixture("MIRA", { collectedFields: { from: "BISHKEK", to: "KARAKOL", date: "TOMORROW" } }),
+    );
+    providerUnderstandMock.mockResolvedValue({
+      ...PASSIVE_UNDERSTANDING,
+      entities: { to: "OSH" },
+    });
+
+    await handleMiraInbound({ ...BASE_PARAMS, text: "жок, Ошко" });
+
+    expect(sessionMocks.updateConversationState).toHaveBeenCalledWith(
+      "conv_1",
+      expect.objectContaining({
+        collectedFields: { from: "BISHKEK", to: "OSH", date: "TOMORROW" },
+      }),
+    );
+  });
+
+  it("lets a later turn change a previously collected passenger count", async () => {
+    sessionMocks.getOrCreateActiveConversation.mockResolvedValue(
+      conversationFixture("MIRA", { collectedFields: { from: "BISHKEK", to: "KARAKOL", passengerCount: 2 } }),
+    );
+    providerUnderstandMock.mockResolvedValue({
+      ...PASSIVE_UNDERSTANDING,
+      entities: { passengerCount: 4 },
+    });
+
+    await handleMiraInbound({ ...BASE_PARAMS, text: "жок, төрт киши болобуз" });
+
+    expect(sessionMocks.updateConversationState).toHaveBeenCalledWith(
+      "conv_1",
+      expect.objectContaining({
+        collectedFields: expect.objectContaining({ passengerCount: 4 }),
+      }),
+    );
+  });
+
+  it('lets "жок, бүгүн" correct a previously collected date without losing route/seats', async () => {
+    sessionMocks.getOrCreateActiveConversation.mockResolvedValue(
+      conversationFixture("MIRA", { collectedFields: { from: "BISHKEK", to: "KARAKOL", date: "TOMORROW", passengerCount: 2 } }),
+    );
+    providerUnderstandMock.mockResolvedValue({
+      ...PASSIVE_UNDERSTANDING,
+      entities: { date: "TODAY" },
+    });
+
+    await handleMiraInbound({ ...BASE_PARAMS, text: "жок, бүгүн" });
+
+    expect(sessionMocks.updateConversationState).toHaveBeenCalledWith(
+      "conv_1",
+      expect.objectContaining({
+        collectedFields: { from: "BISHKEK", to: "KARAKOL", date: "TODAY", passengerCount: 2 },
+      }),
+    );
+  });
+
+  it("preserves earlier fields when a turn answers only one of the previously missing fields", async () => {
+    sessionMocks.getOrCreateActiveConversation.mockResolvedValue(
+      conversationFixture("MIRA", { collectedFields: { from: "BISHKEK", to: "KARAKOL", date: "TOMORROW" } }),
+    );
+    // The provider only extracts what this turn's text actually contains —
+    // it must not report null/undefined for fields already known so that
+    // the merge has no way to accidentally erase them.
+    providerUnderstandMock.mockResolvedValue({
+      ...PASSIVE_UNDERSTANDING,
+      entities: { time: "08:00" },
+    });
+
+    await handleMiraInbound({ ...BASE_PARAMS, text: "саат 8ден кийин" });
+
+    expect(sessionMocks.updateConversationState).toHaveBeenCalledWith(
+      "conv_1",
+      expect.objectContaining({
+        collectedFields: { from: "BISHKEK", to: "KARAKOL", date: "TOMORROW", time: "08:00" },
+      }),
+    );
   });
 });

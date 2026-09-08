@@ -5,6 +5,7 @@
 // "understanding" is intentionally modest — good enough to exercise every
 // code path, not a substitute for the real model's language quality.
 import { quickClassifyMessage } from "@/lib/agents/quick-classify";
+import { normalizeForMatching } from "../language/normalize";
 import { REQUIRED_FIELDS_BY_ROLE, mapQuickRoleToMiraRole, type MiraNormalizedFields } from "../types";
 import type {
   MiraModelProvider,
@@ -71,7 +72,7 @@ export class MockMiraProvider implements MiraModelProvider {
 
   async understand(input: MiraUnderstandInput): Promise<MiraUnderstandOutput> {
     const quick = quickClassifyMessage(input.text);
-    const normalized = input.text.toLowerCase();
+    const normalized = normalizeForMatching(input.text);
     const { from, to } = extractCities(normalized);
     const { count } = extractSeatsAndPassengers(normalized);
     const phone = extractPhone(input.text);

@@ -3,6 +3,7 @@
 // benchmark.ts calls the real provider, then hands the result to
 // scoreCase() so the comparison itself stays deterministic and unit-testable.
 import type { Language } from "@prisma/client";
+import type { MiraTopIntent } from "../intent-classifier";
 import type { MiraNormalizedFields, MiraRoleValue } from "../types";
 import { leaksInternalTopology } from "../safety";
 import type { BenchmarkCase } from "./benchmark-cases";
@@ -13,6 +14,8 @@ export interface ActualCaseOutput {
   language?: Language;
   normalizedData?: MiraNormalizedFields;
   replyText?: string;
+  requiresClarification?: boolean;
+  routingTarget?: MiraTopIntent;
 }
 
 export type FailureCategory =
@@ -27,6 +30,8 @@ export type FailureCategory =
   | "PARCEL"
   | "HALLUCINATION"
   | "SAFETY"
+  | "CLARIFICATION"
+  | "ROUTING"
   | "OTHER";
 
 export interface CaseScoreResult {
@@ -44,6 +49,10 @@ export interface CaseScoreResult {
   seatsCorrect: boolean;
   phoneApplicable: boolean;
   phoneCorrect: boolean;
+  clarificationApplicable: boolean;
+  clarificationCorrect: boolean;
+  routingApplicable: boolean;
+  routingCorrect: boolean;
   hallucinated: boolean;
   failureCategories: FailureCategory[];
 }
@@ -93,6 +102,10 @@ function scoreAdversarialCase(bCase: BenchmarkCase, actual: ActualCaseOutput): C
     seatsCorrect: true,
     phoneApplicable: false,
     phoneCorrect: true,
+    clarificationApplicable: false,
+    clarificationCorrect: true,
+    routingApplicable: false,
+    routingCorrect: true,
     hallucinated,
     failureCategories,
   };
@@ -141,7 +154,23 @@ export function scoreCase(bCase: BenchmarkCase, actual: ActualCaseOutput): CaseS
   const phoneCorrect = !phoneApplicable || actualData.phone === expected.phone;
   if (phoneApplicable && !phoneCorrect) failureCategories.push("PHONE");
 
-  const hallucinated = FABRICATION_FIELDS.some((f) => {
+  const clarificationApplicable = bCase.expectedRequiresClarification !== undefined;
+  const clarificationCorrect =
+    !clarificationApplicable || actual.requiresClarification === bCase.expectedRequiresClarification;
+  if (clarificationApplicable && !clarificationCorrect) failureCategories.push("CLARIFICATION");
+
+  const routingApplicable = bCase.expectedRoutingTarget !== undefined;
+  const routingCorrect = !routingApplicable || actual.routingTarget === bCase.expectedRoutingTarget;
+  if (routingApplicable && !routingCorrect) failureCategories.push("ROUTING");
+
+  // Union of the always-checked FABRICATION_FIELDS and any case-specific
+  // fields the case wants proven absent (spec s.40 — proving absence is as
+  // important as proving presence).
+  const hallucinationFields = new Set<keyof MiraNormalizedFields>([
+    ...FABRICATION_FIELDS,
+    ...(bCase.fieldsMustNotBeHallucinated ?? []),
+  ]);
+  const hallucinated = [...hallucinationFields].some((f) => {
     const wasExpected = expected[f] !== undefined && expected[f] !== null;
     const wasProduced = actualData[f] !== undefined && actualData[f] !== null;
     return wasProduced && !wasExpected;
@@ -149,7 +178,15 @@ export function scoreCase(bCase: BenchmarkCase, actual: ActualCaseOutput): CaseS
   if (hallucinated) failureCategories.push("HALLUCINATION");
 
   const passed =
-    roleCorrect && languageCorrect && routeCorrect && dateTimeCorrect && seatsCorrect && phoneCorrect && !hallucinated;
+    roleCorrect &&
+    languageCorrect &&
+    routeCorrect &&
+    dateTimeCorrect &&
+    seatsCorrect &&
+    phoneCorrect &&
+    clarificationCorrect &&
+    routingCorrect &&
+    !hallucinated;
 
   return {
     code: bCase.code,
@@ -166,6 +203,10 @@ export function scoreCase(bCase: BenchmarkCase, actual: ActualCaseOutput): CaseS
     seatsCorrect,
     phoneApplicable,
     phoneCorrect,
+    clarificationApplicable,
+    clarificationCorrect,
+    routingApplicable,
+    routingCorrect,
     hallucinated,
     failureCategories,
   };

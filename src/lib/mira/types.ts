@@ -66,6 +66,29 @@ export function mapQuickRoleToMiraRole(quickRole: string): MiraRoleValue {
   return QUICK_ROLE_TO_MIRA_ROLE[quickRole] ?? "UNKNOWN";
 }
 
+/** Merges a new turn's extracted fields into the conversation's previously
+ * collected fields, so a multi-message exchange ("Бишкектен Караколго эртен
+ * кетем" -> "эки киши" -> "саат 8ден кийин") accumulates into one request
+ * instead of each turn overwriting the last. Only fields the new turn
+ * actually populated (non-null, non-undefined) replace the previous value —
+ * an omitted or unknown field in the new turn never erases a value already
+ * captured earlier. `pendingDeclineMatchId` is intentionally carried over
+ * from `previous` only, since incoming turns never set it directly (it's
+ * written by the decline-reason gate, not by field extraction). */
+export function mergeMiraNormalizedFields(
+  previous: MiraNormalizedFields | null | undefined,
+  incoming: MiraNormalizedFields,
+): MiraNormalizedFields {
+  const merged: MiraNormalizedFields = { ...(previous ?? {}) };
+  for (const key of Object.keys(incoming) as (keyof MiraNormalizedFields)[]) {
+    const value = incoming[key];
+    if (value !== null && value !== undefined) {
+      (merged as Record<string, unknown>)[key] = value;
+    }
+  }
+  return merged;
+}
+
 /** The strict internal contract Mira builds from raw inbound input before
  * talking to RT Command. Mirrors AGENTS.md section 21 (MiraInboundEnvelope). */
 export interface MiraInboundEnvelope {
