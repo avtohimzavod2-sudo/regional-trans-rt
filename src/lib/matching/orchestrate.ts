@@ -56,7 +56,12 @@ function toMatchableOffer(o: {
   };
 }
 
-async function excludedOfferIdsForRequest(requestId: string): Promise<string[]> {
+/** Exported for reuse by RT OFFICE's read-only demand/supply resolution
+ * (spec s.5/MATCHING correction): RT OFFICE MUST reuse this exact
+ * exclusion-aware logic rather than building a weaker parallel advisory
+ * candidate query that could describe an offer to a passenger the driver
+ * has already declined for them. */
+export async function excludedOfferIdsForRequest(requestId: string): Promise<string[]> {
   const declined = await db.match.findMany({
     where: { tripRequestId: requestId, status: { in: ["DECLINED_BY_DRIVER", "DECLINED_BY_PASSENGER", "EXPIRED", "CANCELLED"] } },
     select: { driverOfferId: true },
@@ -218,30 +223,73 @@ export async function handlePassengerResponse(matchId: string, accepted: boolean
   if (match.status !== "AWAITING_PASSENGER") return match;
 
   if (!accepted) {
-    const updated = await db.match.update({
-      where: { id: matchId },
+    // Atomic, condition-guarded transition: if a duplicate/concurrent delivery
+    // already moved this match off AWAITING_PASSENGER, count is 0 and we
+    // return the current row as a no-op instead of re-running side effects
+    // (duplicate driver notification, duplicate re-matching).
+    const declineResult = await db.match.updateMany({
+      where: { id: matchId, status: "AWAITING_PASSENGER" },
       data: { status: "DECLINED_BY_PASSENGER", passengerRespondedAt: new Date() },
     });
+    if (declineResult.count === 0) return db.match.findUniqueOrThrow({ where: { id: matchId } });
+
     await db.tripRequest.update({ where: { id: match.tripRequestId }, data: { status: "PENDING" } });
     await logAction({ actorType: "AGENT", action: "match.declined_by_passenger", entityType: "Match", entityId: matchId });
     const driverLang = (match.driverOffer.driver.preferredLang ?? "RU") as Lang;
     await sendTelegramMessage(match.driverOffer.driver.telegramUserId, messages.declinedTryNext[driverLang]);
     await proposeMatchesForRequest(match.tripRequestId);
-    return updated;
+    return db.match.findUniqueOrThrow({ where: { id: matchId } });
   }
 
+  // Same atomic-guard pattern for confirmation: only one concurrent/duplicate
+  // call can win this updateMany (status="AWAITING_PASSENGER" is consumed by
+  // whichever call gets there first), so everything below — seat decrement,
+  // Trip creation, contact reveal — can only ever run once per match.
   const now = new Date();
-  const [updatedMatch] = await db.$transaction([
-    db.match.update({ where: { id: matchId }, data: { status: "CONFIRMED", passengerRespondedAt: now, confirmedAt: now } }),
-    db.tripRequest.update({ where: { id: match.tripRequestId }, data: { status: "CONFIRMED" } }),
-  ]);
+  const confirmResult = await db.match.updateMany({
+    where: { id: matchId, status: "AWAITING_PASSENGER" },
+    data: { status: "CONFIRMED", passengerRespondedAt: now, confirmedAt: now },
+  });
+  if (confirmResult.count === 0) return db.match.findUniqueOrThrow({ where: { id: matchId } });
+  await db.tripRequest.update({ where: { id: match.tripRequestId }, data: { status: "CONFIRMED" } });
 
-  const offer = await db.driverOffer.findUniqueOrThrow({ where: { id: match.driverOfferId } });
   const request = await db.tripRequest.findUniqueOrThrow({ where: { id: match.tripRequestId }, include: { passenger: true } });
-  const newSeatsAvailable = Math.max(0, offer.seatsAvailable - request.seats);
+
+  // Atomic conditional decrement: the where-clause guard (seatsAvailable >=
+  // request.seats) makes this a compare-and-swap, so two concurrent
+  // confirmations against the same offer can never both succeed and
+  // overdraw seatsAvailable below zero (the prior Math.max(0, ...) read-
+  // modify-write was not safe against that race).
+  const seatUpdateResult = await db.driverOffer.updateMany({
+    where: { id: match.driverOfferId, seatsAvailable: { gte: request.seats } },
+    data: { seatsAvailable: { decrement: request.seats } },
+  });
+  if (seatUpdateResult.count === 0) {
+    // Match is already CONFIRMED above, so we cannot silently drop this —
+    // seats were genuinely exhausted by another confirmation between
+    // proposal and this response. Never invent availability: open a support
+    // case for a human to resolve instead.
+    const ctx = rootContext();
+    await openSupportCase(ctx, {
+      caseType: "OTHER",
+      openedByType: "AGENT",
+      openedById: "MATCHING",
+      description: `Seat decrement failed on passenger confirmation: offer ${match.driverOfferId} no longer had ${request.seats} seat(s) available (matchId ${matchId}).`,
+    });
+    await logAction({
+      actorType: "AGENT",
+      action: "match.seat_decrement_failed",
+      entityType: "Match",
+      entityId: matchId,
+      details: { offerId: match.driverOfferId, requestedSeats: request.seats },
+    });
+    return db.match.findUniqueOrThrow({ where: { id: matchId } });
+  }
+
+  const updatedOffer = await db.driverOffer.findUniqueOrThrow({ where: { id: match.driverOfferId } });
   await db.driverOffer.update({
-    where: { id: offer.id },
-    data: { seatsAvailable: newSeatsAvailable, status: newSeatsAvailable === 0 ? "FULL" : "PARTIALLY_FILLED" },
+    where: { id: updatedOffer.id },
+    data: { status: updatedOffer.seatsAvailable === 0 ? "FULL" : "PARTIALLY_FILLED" },
   });
 
   const trip = await db.trip.create({
@@ -256,7 +304,7 @@ export async function handlePassengerResponse(matchId: string, accepted: boolean
 
   await revealContacts(matchId, trip.id);
   await logAction({ actorType: "AGENT", action: "match.confirmed", entityType: "Match", entityId: matchId, details: { tripId: trip.id } });
-  return updatedMatch;
+  return db.match.findUniqueOrThrow({ where: { id: matchId } });
 }
 
 async function revealContacts(matchId: string, tripId: string) {

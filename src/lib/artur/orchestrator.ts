@@ -13,6 +13,7 @@ export const ARTUR_AGENT_CONTRACT: AgentContract = {
     "Be RT's Director-level AI: continuously observe the whole organization through RT Core's authoritative data, verify manager summaries rather than blindly trusting them, deliver an honest 08:00 daily Founder Brief and a deeper Monday 10:00 weekly Director Report with exactly 3 evidence-based initiatives, escalate genuine force-majeure situations to the Founder 24/7, and never become a universal execution agent that bypasses or duplicates Mira/Sapar/Sapargul/Tyyin/Adilet/Zholaman/Akzhol.",
   inputs: [
     "read-only aggregation over Trip/TripRequest (passenger), Shipment/ShipmentIncident (cargo), AdiletCase (complaints), and Tyyin's own buildTreasuryDailyReport (finance) — never a second parallel computation of Tyyin's numbers",
+    "read-only operational visibility into RT OFFICE's demand/supply resolution and CRM Auto's DriveCrmEvent log (Driver/DriverOffer/Match/Trip state, ETA/breakdown facts) — never a write path onto any of it",
     "open EmergencyIncident / DirectorInitiative state for founderDecisionsRequired",
     "Founder decisions on proposed initiatives (APPROVED/REJECTED/DEFERRED/NEEDS_REVISION)",
   ],
@@ -25,6 +26,7 @@ export const ARTUR_AGENT_CONTRACT: AgentContract = {
   ],
   permissions: [
     "read TripRequest/Trip/Match, Shipment/ShipmentIncident, AdiletCase, TreasuryTransaction/AccountantCase (via Tyyin's report builder only)",
+    "read Driver/DriverOffer/Match/Trip and DriveCrmEvent (RT OFFICE / Drive CRM operational state) — read-only",
     "read/write FounderBrief, WeeklyDirectorReport, DirectorInitiative, EmergencyIncident, NotificationDelivery, ScheduledJobRun",
     "write AuditLogEntry (agent: ARTUR)",
   ],
@@ -33,6 +35,7 @@ export const ARTUR_AGENT_CONTRACT: AgentContract = {
     "never write to ShipmentPayment/PAYMENT_CONFIRMED (Sapargul's exclusive cargo-payment-confirmation capability)",
     "never write to TreasuryTransaction/AccountantCase directly (Tyyin's exclusive central-treasury capability) — read-only via buildTreasuryDailyReport",
     "never write an AdiletCase decision/sanction (Adilet's exclusive independent-arbitration capability)",
+    "never directly mutate seats/vehicles/driver availability/trips or DriveCrmEvent (RT OFFICE's and CRM Auto's exclusive write surfaces) — read-only operational visibility only",
     "never send an external customer-facing message (Mira's exclusive external-communication capability)",
     "never auto-implement a weekly initiative — every state past PROPOSED requires an explicit Founder-authorized call (spec s.16)",
     "never fabricate a metric, a cause, or a 4th/2nd initiative to force the exactly-3 count — a wrong count is a defect to surface, not to silently repair",
@@ -51,7 +54,7 @@ export const ARTUR_AGENT_CONTRACT: AgentContract = {
   ],
   reportsTo: "FOUNDER",
   ownsExclusiveCapabilities: ["director_daily_brief", "director_weekly_report", "director_strategic_initiative_proposal"],
-  canRead: ["trip_request", "trip", "shipment", "shipment_incident", "adilet_case", "treasury_period_report"],
+  canRead: ["trip_request", "trip", "shipment", "shipment_incident", "adilet_case", "treasury_period_report", "driver_offer", "match", "drive_crm_event"],
   canWrite: ["founder_brief", "weekly_director_report", "director_initiative", "emergency_incident", "notification_delivery", "scheduled_job_run"],
   forbiddenCapabilities: [
     "confirm_cargo_payment",

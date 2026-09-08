@@ -107,6 +107,8 @@ enum AgentName {
   ADILET
   TYYIN
   ARTUR
+  RT_OFFICE
+  CRM_AUTO
 }
 
 enum PaymentMode {
@@ -269,6 +271,7 @@ model Driver {
   ledgerEntries     LedgerEntry[]
   scoutCandidates   ScoutCandidate[]
   parcels           Parcel[]
+  driveCrmEvents    DriveCrmEvent[]
 }
 
 model TripRequest {
@@ -2222,4 +2225,66 @@ model NotificationDelivery {
   updatedAt DateTime @updatedAt
 
   @@index([kind, status])
+}
+
+// ============================================================================
+// RT OFFICE / CRM AUTO — supply<->demand awareness + Drive CRM automation.
+// RT OFFICE never owns a Prisma model of its own: it is a read-only query +
+// thin-write (re-triggering existing matching) layer over RT Core's existing
+// Driver/DriverOffer/Match/Trip tables (src/lib/rt-office). CRM Auto owns
+// exactly this one append-only model.
+// ============================================================================
+
+enum DriveCrmEventType {
+  OPERATIONAL_ETA
+  BREAKDOWN_INCIDENT
+  BACKHAUL_OPPORTUNITY
+  OPERATIONAL_HISTORY
+  // An exceptional, explicitly audited correction of an earlier event (e.g.
+  // a false breakdown report). Never overwrites or deletes the original row
+  // — it is a new append-only event that references the corrected one via
+  // correctsEventId, preserving full historical auditability.
+  CORRECTION
+}
+
+enum DriveCrmIncidentStatus {
+  OPEN
+  RESOLVED
+}
+
+// CRM Auto's own append-only operational-history log. This is NOT a
+// competing source of truth for Driver/DriverOffer/Match/Trip state — those
+// remain RT Core's exclusive write surface (see matching/orchestrate.ts).
+// DriveCrmEvent only ever RECORDS a fact already verified elsewhere (RT
+// Core state, or a verified upstream signal such as Jolchu for ETA); CRM
+// Auto never computes its own ETA/incident/backhaul facts from scratch.
+// tripId/offerId are loose correlation ids (same pattern as
+// MiraConversation.collectedFields.pendingDeclineMatchId) — deliberately NOT
+// a Prisma relation, so this model can never become a second write path
+// onto Trip/DriverOffer. Rows are NEVER updated or deleted after creation
+// (see crm-auto/boundary.test.ts) — a mistaken event is corrected by
+// appending a CORRECTION event that references it via correctsEventId,
+// never by mutating history.
+model DriveCrmEvent {
+  id              String                  @id @default(cuid())
+  driverId        String
+  driver          Driver                  @relation(fields: [driverId], references: [id])
+  tripId          String?
+  offerId         String?
+  eventType       DriveCrmEventType
+  incidentStatus  DriveCrmIncidentStatus? // only meaningful when eventType = BREAKDOWN_INCIDENT
+  etaMinutes      Int? // only meaningful when eventType = OPERATIONAL_ETA; must come from a verified calculation (e.g. Jolchu), never invented
+  source          String // e.g. "JOLCHU", "DRIVER_REPORT", "RT_OFFICE", "SYSTEM" — never blank; feeds RT OFFICE's required "data freshness/source" fact
+  details         Json?
+  // Loose correlation id (not a self-relation, same reasoning as tripId/
+  // offerId) to the DriveCrmEvent this CORRECTION event corrects. Only
+  // meaningful when eventType = CORRECTION.
+  correctsEventId String?
+  idempotencyKey  String                  @unique // guards against duplicate webhook/event delivery re-recording the same event
+
+  createdAt DateTime @default(now())
+
+  @@index([driverId, eventType, createdAt])
+  @@index([driverId, eventType, incidentStatus])
+  @@index([correctsEventId])
 }

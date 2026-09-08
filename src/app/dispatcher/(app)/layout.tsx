@@ -38,6 +38,12 @@ export default function DispatcherLayout({ children }: { children: React.ReactNo
             <Link href="/dispatcher/artur" className="hover:text-neutral-100">
               Артур
             </Link>
+            <Link href="/dispatcher/rt-office" className="hover:text-neutral-100">
+              RT Office
+            </Link>
+            <Link href="/dispatcher/drive-crm" className="hover:text-neutral-100">
+              Drive CRM
+            </Link>
             <Link href="/dispatcher/adilet" className="hover:text-neutral-100">
               Адилет
             </Link>

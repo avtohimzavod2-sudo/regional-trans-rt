@@ -20,11 +20,15 @@ graph TD
     SAPARGUL["SAPARGUL — cargo cashier\ncriticality: CRITICAL"]
     TYYIN["TYYIN — central treasury\ncriticality: CRITICAL"]
     ADILET["ADILET — arbitration/discipline\ncriticality: HIGH"]
+    RTOFFICE["RT_OFFICE — demand/supply facts\ncriticality: MEDIUM"]
+    CRMAUTO["CRM_AUTO — Drive CRM event log\ncriticality: MEDIUM"]
 
     ARTUR --> MIRA
     ARTUR --> SAPAR
     ARTUR --> TYYIN
     ARTUR --> ADILET
+    ARTUR --> RTOFFICE
+    ARTUR --> CRMAUTO
 
     SAPARGUL -. reportsTo .-> TYYIN
 
@@ -33,6 +37,8 @@ graph TD
 
     ARTUR -.observes/reads.-> JOLCHU
     ARTUR -.observes/reads.-> SAPARP
+    RTOFFICE -.reuses.-> SAPARP
+    CRMAUTO -.feeds facts.-> RTOFFICE
 
     classDef critical fill:#7a1f1f,stroke:#f66,color:#fff;
     classDef high fill:#5a4b1f,stroke:#fc6,color:#fff;
@@ -61,6 +67,8 @@ spec s.0.3 ("do not rewrite working systems unnecessarily").
 | SAPARGUL | Cargo payment requests + evidence intake (never confirms) | TYYIN | CRITICAL |
 | TYYIN | Central treasury journal, bank reconciliation, inbound-only | ARTUR | CRITICAL |
 | ADILET | Independent complaint arbitration and sanctions | ARTUR | HIGH |
+| RT_OFFICE | Converts RT Core's Driver/DriverOffer/Match/Trip state + CRM Auto facts into verified demand/supply facts for Mira | ARTUR | MEDIUM |
+| CRM_AUTO | Services Drive CRM: append-only ETA/breakdown/backhaul/history log (`DriveCrmEvent`) | ARTUR | MEDIUM |
 | JOLCHU | Route/geo resolution | — | — |
 | COMMAND / PASSENGER / DRIVER / MATCH / ROUTE / TRUST / PAY / SUPPORT / PARCEL / SCOUT / QUALITY / ANALYTICS / NETWORK | Passenger-side matching/dispatch stack | — | — |
 
@@ -119,11 +127,59 @@ Artur directly reads from, not a re-listing of every event in the codebase.
 
 Artur's `AgentContract.canRead` lists exactly what it reads:
 `trip_request`, `trip`, `shipment`, `shipment_incident`, `adilet_case`,
-`treasury_period_report`. The last one is deliberate: Artur never
-recomputes Tyyin's financial numbers from raw `TreasuryTransaction` rows
-itself — it calls Tyyin's own `buildTreasuryDailyReport`
-(`src/lib/tyyin/reports.ts`), so there is exactly one financial-reporting
-code path, and Artur's dashboard can never silently drift from what Tyyin
-itself would report. `src/lib/artur/boundary.test.ts` guards the write side
-of this: no file under `src/lib/artur/` may import a mutation function from
-Sapargul, Tyyin, or Adilet directly.
+`treasury_period_report`, `driver_offer`, `match`, `drive_crm_event`. The
+`treasury_period_report` entry is deliberate: Artur never recomputes
+Tyyin's financial numbers from raw `TreasuryTransaction` rows itself — it
+calls Tyyin's own `buildTreasuryDailyReport` (`src/lib/tyyin/reports.ts`),
+so there is exactly one financial-reporting code path, and Artur's
+dashboard can never silently drift from what Tyyin itself would report.
+`src/lib/artur/boundary.test.ts` guards the write side of this: no file
+under `src/lib/artur/` may import a mutation function from Sapargul,
+Tyyin, or Adilet directly.
+
+## 5. RT OFFICE + CRM Auto — demand/supply facts and Drive CRM
+
+**"CLIENTS NEED VEHICLES. VEHICLES NEED CLIENTS."** RT OFFICE's whole job is
+continuously comparing unresolved passenger demand (`TripRequest`) against
+verified driver supply (`DriverOffer`) and converting RT Core's existing
+state into structured, never-invented facts for Mira to phrase — it never
+talks to a passenger or driver itself (`src/lib/rt-office/boundary.test.ts`
+forbids importing any messaging/payment function), never owns Mira CRM data,
+and never runs a second matching engine: candidate scoring is
+`src/lib/matching/engine.ts`'s real `findCandidateOffers`
+(`src/lib/rt-office/facts.ts`), and its one write path
+(`reportSupplyAvailable`) re-triggers the existing MATCH agent
+(`src/lib/agents/match.ts`) rather than writing `DriverOffer`/`Match`/`Trip`
+itself. Its read path also reuses `matching/orchestrate.ts`'s real
+exclusion-aware logic (`excludedOfferIdsForRequest`, the same function
+`proposeMatchesForRequest` uses) rather than a weaker parallel advisory
+query, so it can never describe an offer to a passenger the driver has
+already declined for their request.
+
+CRM Auto services **Drive CRM**: it owns exactly one Prisma model
+(`DriveCrmEvent`, append-only) and the `drive_crm_event_write` exclusive
+capability, recording only verified operational ETA, breakdown/incident,
+backhaul-opportunity, and operational-history facts —
+`recordOperationalEvent` is idempotent against duplicate webhook/event
+delivery via `DriveCrmEvent.idempotencyKey`'s real DB unique constraint
+(Prisma P2002), and breakdown open/resolve transitions
+(`src/lib/crm-auto/lifecycle.ts`) are deterministic code, never a free-form
+LLM decision. RT OFFICE reads CRM Auto's facts exclusively through
+`src/lib/crm-auto/bridge.ts` rather than querying `DriveCrmEvent` directly,
+so CRM Auto stays the single read/write access point onto its own model.
+Rows are never updated or deleted (`src/lib/crm-auto/boundary.test.ts`
+forbids `db.driveCrmEvent.update`/`.delete`/`.upsert`) — full historical
+auditability is preserved by `recordExceptionalCorrection` appending a new
+`CORRECTION` event that references the original via `correctsEventId`
+instead of mutating it. A `CORRECTION` referencing the driver's latest OPEN
+breakdown does have real effect on derived operational state: RT OFFICE's
+`latestOpenBreakdownForDriver` (`src/lib/crm-auto/bridge.ts`) reads the
+driver's most recent `BREAKDOWN_INCIDENT` row and reports no open breakdown
+if that row is either superseded by a newer `RESOLVED` row or covered by a
+`CORRECTION` — the original `BREAKDOWN_INCIDENT` row's `incidentStatus`
+itself is still never mutated; only what this derived read reports changes.
+
+Both report to Artur with read-only visibility (`canRead` includes
+`driver_offer`, `match`, `drive_crm_event`) and neither declares a
+`director_*` or other manager-agent capability — see
+`docs/AGENT_CONSTITUTION.md` s.2 for the full exclusive-capability table.

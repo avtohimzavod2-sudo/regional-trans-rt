@@ -40,6 +40,7 @@ contract):
 | `cargo_operational_status`, `assign_cargo_delivery_executor` | SAPAR |
 | `external_customer_communication` | MIRA |
 | `director_daily_brief`, `director_weekly_report`, `director_strategic_initiative_proposal` | ARTUR |
+| `drive_crm_event_write` | CRM_AUTO |
 
 ## 3. Role-boundary preservation
 
@@ -67,7 +68,39 @@ weakened by Artur's introduction (spec s.4):
   execution agent: `ARTUR_AGENT_CONTRACT.forbiddenCapabilities` lists every
   capability above by name, and `src/lib/artur/boundary.test.ts` is a
   static source-scan asserting no file under `src/lib/artur/` imports a
-  mutation function from Sapargul/Tyyin/Adilet's modules directly.
+  mutation function from Sapargul/Tyyin/Adilet's modules directly. Artur's
+  visibility into RT OFFICE / Drive CRM (below) is read-only the same way.
+- **RT OFFICE** — converts RT Core's existing Driver/DriverOffer/Match/Trip
+  state and CRM Auto's DriveCrmEvent log into verified, never-invented
+  supply facts for Mira to phrase to a passenger. It owns no Prisma model
+  and no exclusive capability: every write it triggers flows through the
+  existing matching engine (`src/lib/matching/orchestrate.ts` via
+  `src/lib/agents/match.ts`), never a second matching engine or a direct
+  write to DriverOffer/Match/Trip. Its read path is exclusion-aware for the
+  same reason: `resolveDemandAgainstSupply` (`src/lib/rt-office/facts.ts`)
+  calls `matching/orchestrate.ts`'s exported `excludedOfferIdsForRequest` —
+  the exact function `proposeMatchesForRequest` itself uses — so RT OFFICE
+  can never describe an offer to a passenger that the driver has already
+  declined for their request. It is never a second public persona —
+  `src/lib/rt-office/boundary.test.ts` statically forbids it from importing
+  any external-comms/payment function or writing those tables directly.
+- **CRM Auto** — services Drive CRM: the sole owner of `drive_crm_event_write`,
+  appending verified operational facts (ETA, breakdown/incident, backhaul
+  opportunity, operational history) to its own append-only `DriveCrmEvent`
+  model. It never owns Mira CRM, never replaces RT OFFICE's demand/supply
+  resolution, never orchestrates other agents, and never calculates money —
+  `src/lib/crm-auto/boundary.test.ts` statically enforces all of this, the
+  same pattern as RT OFFICE's. `DriveCrmEvent` rows are never updated or
+  deleted after creation (the boundary test forbids
+  `db.driveCrmEvent.update`/`.delete`/`.upsert`) — a mistaken fact (e.g. a
+  false breakdown report) is fixed only by `recordExceptionalCorrection`
+  appending a new `CORRECTION` event that references the original via
+  `correctsEventId`, preserving full historical auditability rather than
+  silently rewriting history. That correction does feed back into RT
+  OFFICE's derived operational state — a `CORRECTION` covering the driver's
+  latest OPEN breakdown clears the "Поломка" state the dispatcher UI shows —
+  but strictly as a read-time derivation over the append-only log, never as
+  a mutation of the original row.
 
 A human manager role (Zholaman/Akzhol in the spec's terminology) sits above
 individual specialists operationally but still may not rewrite an
