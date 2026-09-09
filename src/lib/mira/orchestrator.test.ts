@@ -82,6 +82,12 @@ vi.mock("@/lib/jolchu/orchestrator", () => ({ resolveRouteIntelligence: resolveR
 const openCaseMock = vi.fn();
 vi.mock("@/lib/adilet/case", () => ({ openCase: openCaseMock }));
 
+const recordInboundBusinessProspectMock = vi.fn().mockResolvedValue({ prospectId: "biz_1", created: true });
+vi.mock("@/lib/delivery-contractor/orchestrator", () => ({ recordInboundBusinessProspect: recordInboundBusinessProspectMock }));
+
+const driverDemandPropositionMock = vi.fn().mockResolvedValue(null);
+vi.mock("./propositions", () => ({ driverDemandProposition: driverDemandPropositionMock }));
+
 const { handleMiraInbound, handleMiraMatchDecision } = await import("./orchestrator");
 
 const BASE_PARAMS = { channel: "WHATSAPP" as const, senderId: "+996700000001", text: "" };
@@ -181,7 +187,14 @@ describe("handleMiraInbound — top-intent gate (Mira Pass 1 spec s.2/s.21)", ()
     expect(openCaseMock).not.toHaveBeenCalled();
     expect(handleSaparInboundMock).not.toHaveBeenCalled();
     expect(handleInboundMessageMock).not.toHaveBeenCalled();
-    expect(logAgentActionMock).toHaveBeenCalledWith(expect.objectContaining({ action: "MIRA_PARTNER_INQUIRY_TAGGED" }));
+    expect(recordInboundBusinessProspectMock).toHaveBeenCalledTimes(1);
+    expect(recordInboundBusinessProspectMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ sourceText: "Хотим стать вашим партнером, есть франшиза?", contactPhone: BASE_PARAMS.senderId }),
+    );
+    expect(logAgentActionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "MIRA_PARTNER_INQUIRY_TAGGED", details: expect.objectContaining({ businessProspectId: "biz_1" }) }),
+    );
   });
 });
 
@@ -327,6 +340,45 @@ describe("handleMiraInbound — RT Command fallback (plain passenger text)", () 
     expect(result.replyText).not.toContain("500 сом");
     expect(result.replyText).not.toContain("Водитель найден");
     expect(result.replyText.length).toBeGreaterThan(0);
+  });
+});
+
+describe("handleMiraInbound — driver-role Market Gap proposition (task #124, read-only)", () => {
+  it("appends the live driverDemandProposition text only when a driver offer was just created", async () => {
+    sessionMocks.getOrCreateActiveConversation.mockResolvedValue(conversationFixture("MIRA"));
+    handleInboundMessageMock.mockResolvedValue({
+      traceId: "cmd_trace_1",
+      routedTo: ["COMMAND"],
+      outcome: "driver_offer_created",
+    } satisfies CommandResult);
+    providerReplyMock.mockResolvedValue({ text: "Записала вашу поездку, ищу пассажира." });
+    driverDemandPropositionMock.mockResolvedValue({ text: "Сейчас много пассажиров на платформе.", priority: "HIGH_DRIVER_ACQUISITION_NEED", gapSeats: -14 });
+
+    const result = await handleMiraInbound({ ...BASE_PARAMS, text: "Из Бишкека в Ош, 4 места, завтра" });
+
+    expect(driverDemandPropositionMock).toHaveBeenCalledTimes(1);
+    expect(result.replyText).toContain("Сейчас много пассажиров на платформе.");
+    expect(logAgentActionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "MIRA_DRIVER_OFFER_CREATED",
+        details: expect.objectContaining({ driverMarketGapProposition: { priority: "HIGH_DRIVER_ACQUISITION_NEED", gapSeats: -14 } }),
+      }),
+    );
+  });
+
+  it("never calls driverDemandProposition for a non-driver outcome, and never appends anything when it returns null", async () => {
+    sessionMocks.getOrCreateActiveConversation.mockResolvedValue(conversationFixture("MIRA"));
+    handleInboundMessageMock.mockResolvedValue({
+      traceId: "cmd_trace_1",
+      routedTo: ["COMMAND"],
+      outcome: "trip_request_created",
+    } satisfies CommandResult);
+    providerReplyMock.mockResolvedValue({ text: "Записала вашу поездку." });
+
+    const result = await handleMiraInbound({ ...BASE_PARAMS, text: "Бишкектен Ошко 2 орун" });
+
+    expect(driverDemandPropositionMock).not.toHaveBeenCalled();
+    expect(result.replyText).toBe("Записала вашу поездку.");
   });
 });
 

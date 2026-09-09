@@ -22,6 +22,9 @@ graph TD
     ADILET["ADILET — arbitration/discipline\ncriticality: HIGH"]
     RTOFFICE["RT_OFFICE — demand/supply facts\ncriticality: MEDIUM"]
     CRMAUTO["CRM_AUTO — Drive CRM event log\ncriticality: MEDIUM"]
+    DRIVERC["DRIVER_CONTRACTOR — driver acquisition\ncriticality: LOW"]
+    PASSC["PASSENGER_CONTRACTOR — passenger acquisition\ncriticality: LOW"]
+    DELIVC["DELIVERY_CONTRACTOR — Delivery CRM\ncriticality: LOW"]
 
     ARTUR --> MIRA
     ARTUR --> SAPAR
@@ -29,6 +32,9 @@ graph TD
     ARTUR --> ADILET
     ARTUR --> RTOFFICE
     ARTUR --> CRMAUTO
+    ARTUR --> DRIVERC
+    ARTUR --> PASSC
+    ARTUR --> DELIVC
 
     SAPARGUL -. reportsTo .-> TYYIN
 
@@ -39,6 +45,11 @@ graph TD
     ARTUR -.observes/reads.-> SAPARP
     RTOFFICE -.reuses.-> SAPARP
     CRMAUTO -.feeds facts.-> RTOFFICE
+    RTOFFICE -.market gap.-> DRIVERC
+    RTOFFICE -.market gap.-> PASSC
+    DRIVERC -.imports via.-> SAPARP
+    PASSC -.hands off qualified prospect.-> MIRA
+    DELIVC -.bounded inbound prospect.-> MIRA
 
     classDef critical fill:#7a1f1f,stroke:#f66,color:#fff;
     classDef high fill:#5a4b1f,stroke:#fc6,color:#fff;
@@ -69,6 +80,9 @@ spec s.0.3 ("do not rewrite working systems unnecessarily").
 | ADILET | Independent complaint arbitration and sanctions | ARTUR | HIGH |
 | RT_OFFICE | Converts RT Core's Driver/DriverOffer/Match/Trip state + CRM Auto facts into verified demand/supply facts for Mira | ARTUR | MEDIUM |
 | CRM_AUTO | Services Drive CRM: append-only ETA/breakdown/backhaul/history log (`DriveCrmEvent`) | ARTUR | MEDIUM |
+| DRIVER_CONTRACTOR | Grows verified driver supply from public/permitted sightings via SCOUT's existing pipeline, gated by Market Gap | ARTUR | LOW |
+| PASSENGER_CONTRACTOR | Grows passenger demand from public/permitted sightings (`PassengerProspect`), hands qualified prospects to Mira | ARTUR | LOW |
+| DELIVERY_CONTRACTOR | Grows the delivery business-partnership pipeline (`BusinessProspect` + Delivery CRM `DeliveryCrmEvent`) | ARTUR | LOW |
 | JOLCHU | Route/geo resolution | — | — |
 | COMMAND / PASSENGER / DRIVER / MATCH / ROUTE / TRUST / PAY / SUPPORT / PARCEL / SCOUT / QUALITY / ANALYTICS / NETWORK | Passenger-side matching/dispatch stack | — | — |
 
@@ -183,3 +197,60 @@ Both report to Artur with read-only visibility (`canRead` includes
 `driver_offer`, `match`, `drive_crm_event`) and neither declares a
 `director_*` or other manager-agent capability — see
 `docs/AGENT_CONSTITUTION.md` s.2 for the full exclusive-capability table.
+
+## 6. Market Acquisition Contractors — Driver / Passenger / Delivery
+
+Three LOW-criticality agents, all reporting to Artur, all read Market Gap
+(`docs/AGENT_CONSTITUTION.md` s.8) rather than inventing their own
+demand/supply number, and all route every outbound message through the
+shared, safety-gated `sendAcquisitionOutreach` adapter
+(`src/lib/acquisition/`) — rate-limited, deduplicated, do-not-contact aware,
+and honest about non-delivery (`DRY_RUN`/`SANDBOX`/`NO_PROVIDER_CONFIGURED`
+are real states surfaced to the dispatcher, never silently reported as a
+successful send).
+
+- **DRIVER_CONTRACTOR** classifies public/permitted driver sightings and
+  imports them through **SCOUT's existing fingerprint pipeline** — there is
+  no second candidate queue; `/dispatcher/driver-contractor` reads the same
+  `ScoutCandidate` rows `/dispatcher/scout` reviews. Outreach only fires
+  when Market Gap reports `HIGH_DRIVER_ACQUISITION_NEED`.
+- **PASSENGER_CONTRACTOR** classifies public/permitted passenger sightings
+  into its own `PassengerProspect` model — deliberately not a
+  `TripRequest`, so a prospect can never be mistaken for a real booking.
+  Outreach only fires when Market Gap reports `PASSENGER_ACQUISITION_NEED`.
+  A prospect only becomes a real passenger once they message RT directly
+  through Mira, at which point `markPassengerProspectConverted` records the
+  real `TripRequestId` — Passenger Contractor never messages as Mira and
+  never writes `TripRequest` itself.
+- **DELIVERY_CONTRACTOR** classifies public/permitted business-advertisement
+  sightings into `BusinessProspect`, tracking the full prospect ->
+  qualified -> partnered relationship in the append-only **Delivery CRM**
+  (`DeliveryCrmEvent`) — explicitly distinct from the `Partner` directory
+  (RT Network's fleet/dispatcher/RT Point registry) and from `Shipment`
+  (Sapar's individual cargo execution record). Once a `HANDOFF_TO_OPERATIONS`
+  event is appended, real deliveries flow through Sapar's existing shipment
+  lifecycle, not through a second one here.
+
+**Mira's two bounded touchpoints** with this pipeline (both read-only from
+Mira's side — she never writes `BusinessProspect`/`DeliveryCrmEvent` and
+never computes her own Market Gap number):
+
+- An inbound `partner_business`-intent message is acknowledged by Mira and
+  handed to `recordInboundBusinessProspect`
+  (`src/lib/delivery-contractor/orchestrator.ts`) — a narrower entry point
+  than the cold-sighting `processBusinessMarketSighting` path, which
+  dedupes/creates the `BusinessProspect` row but **never** calls
+  `sendAcquisitionOutreach`, since Mira herself is already the one message
+  going to that customer this turn.
+- Right after a driver's offer is created, `driverDemandProposition`
+  (`src/lib/mira/propositions.ts`) checks the live Market Gap and — only
+  when it genuinely shows `HIGH_DRIVER_ACQUISITION_NEED` — appends one
+  honest sentence of encouragement to Mira's reply. No gap, no sentence; the
+  number shown is always `computeMarketGap()`'s live result, never a second
+  computation.
+
+Dispatcher visibility: `/dispatcher/market-gap` (the live network-wide gap),
+`/dispatcher/driver-contractor`, `/dispatcher/passenger-contractor`, and
+`/dispatcher/delivery-contractor` are all read-only views — the same
+pattern as `/dispatcher/drive-crm` and `/dispatcher/rt-office` — backed by
+each contractor's own `bridge.ts`.

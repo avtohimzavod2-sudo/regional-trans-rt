@@ -41,6 +41,9 @@ contract):
 | `external_customer_communication` | MIRA |
 | `director_daily_brief`, `director_weekly_report`, `director_strategic_initiative_proposal` | ARTUR |
 | `drive_crm_event_write` | CRM_AUTO |
+| `driver_acquisition_outreach` | DRIVER_CONTRACTOR |
+| `passenger_prospect_write` | PASSENGER_CONTRACTOR |
+| `business_prospect_write`, `delivery_crm_event_write` | DELIVERY_CONTRACTOR |
 
 ## 3. Role-boundary preservation
 
@@ -102,6 +105,32 @@ weakened by Artur's introduction (spec s.4):
   but strictly as a read-time derivation over the append-only log, never as
   a mutation of the original row.
 
+- **Driver / Passenger / Delivery Contractor** (Market Acquisition
+  Contractors) — grow verified supply/demand from public, permitted sources
+  (Telegram/WhatsApp groups, Lalafo, public ads, manual import) without ever
+  becoming a second public persona. None of the three ever sends an external
+  message itself outside the shared, safety-gated
+  `sendAcquisitionOutreach` adapter (rate-limited, deduped, do-not-contact
+  aware, and honest about non-delivery — `DRY_RUN`/`SANDBOX`/
+  `NO_PROVIDER_CONFIGURED` are never coerced into a fabricated `SENT`). Each
+  owns exactly one Prisma write surface — `ScoutCandidate` import (via
+  SCOUT's existing pipeline, not a duplicate one) for Driver Contractor,
+  `PassengerProspect` for Passenger Contractor, `BusinessProspect` +
+  `DeliveryCrmEvent` for Delivery Contractor — and none may invent its own
+  demand/supply number: acquisition priority is always read from RT
+  OFFICE's `computeMarketGap()` (see s.8 below), never recomputed locally.
+  Passenger Contractor never messages a prospect as Mira; it only hands a
+  qualified prospect to Mira for the real conversation. Mira's own bounded,
+  read-only touchpoints with this pipeline —
+  `recordInboundBusinessProspect` (an inbound partner inquiry Mira is
+  already replying to, deduped into `BusinessProspect` but never triggering
+  a second outreach message) and `driverDemandProposition` (one honest
+  encouragement sentence appended only when `computeMarketGap()` genuinely
+  shows `HIGH_DRIVER_ACQUISITION_NEED`) — are documented directly in
+  `MIRA_AGENT_CONTRACT.permissions`/`prohibitedActions` and never let Mira
+  write `BusinessProspect`/`DeliveryCrmEvent` or a market-gap number
+  herself.
+
 A human manager role (Zholaman/Akzhol in the spec's terminology) sits above
 individual specialists operationally but still may not rewrite an
 independent Adilet decision, confirm a payment itself, or bypass Tyyin's
@@ -160,3 +189,18 @@ This scales to 100+ agents because nothing above is agent-count-dependent:
 collision detection is O(agents × capabilities), the registry is a flat
 array, and every boundary is declared data (`AgentContract` fields) checked
 by generic code, not a growing pile of special cases.
+
+## 8. Market Gap — one aggregate number, one home
+
+`src/lib/rt-office/market-gap.ts`'s `computeMarketGap()` is the **only**
+place unresolved passenger demand (`TripRequest.seats`, PENDING/MATCHING) is
+aggregated against verified driver supply (`DriverOffer.seatsAvailable`,
+OPEN/PARTIALLY_FILLED) into a network-wide (or, with `corridorId`, a
+per-corridor) gap. It owns no Prisma model of its own — pure read-only
+aggregation, same "never invent a number" discipline as `rt-office/facts.ts`
+— and every consumer (Driver/Passenger Contractor's acquisition priority,
+Mira's `driverDemandProposition`, the `/dispatcher/market-gap` dashboard)
+calls this one function rather than recomputing demand/supply itself. The
+spec's illustrative 23 demand / 9 supply / -14 gap example is never
+hardcoded anywhere in this codebase; every number shown anywhere is this
+function's live result at call time.

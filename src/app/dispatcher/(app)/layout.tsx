@@ -44,6 +44,18 @@ export default function DispatcherLayout({ children }: { children: React.ReactNo
             <Link href="/dispatcher/drive-crm" className="hover:text-neutral-100">
               Drive CRM
             </Link>
+            <Link href="/dispatcher/market-gap" className="hover:text-neutral-100">
+              Market Gap
+            </Link>
+            <Link href="/dispatcher/driver-contractor" className="hover:text-neutral-100">
+              Driver Contractor
+            </Link>
+            <Link href="/dispatcher/passenger-contractor" className="hover:text-neutral-100">
+              Passenger Contractor
+            </Link>
+            <Link href="/dispatcher/delivery-contractor" className="hover:text-neutral-100">
+              Delivery Contractor
+            </Link>
             <Link href="/dispatcher/adilet" className="hover:text-neutral-100">
               Адилет
             </Link>

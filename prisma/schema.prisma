@@ -109,6 +109,9 @@ enum AgentName {
   ARTUR
   RT_OFFICE
   CRM_AUTO
+  DRIVER_CONTRACTOR
+  PASSENGER_CONTRACTOR
+  DELIVERY_CONTRACTOR
 }
 
 enum PaymentMode {
@@ -650,7 +653,7 @@ model MiraConversation {
   // the same chat/thread — "MIRA" or "SAPAR" today, a future specialist name
   // later. A free string (not a closed enum) so onboarding a new specialist
   // never requires a migration here.
-  activeSpecialist String @default("MIRA")
+  activeSpecialist  String                 @default("MIRA")
   collectedFields   Json? // fields Mira has extracted so far (route, date, seats, ...)
   missingFields     String[] // field names still needed before COMMAND can act
   confirmedFields   Json? // fields the user has explicitly confirmed
@@ -2286,5 +2289,201 @@ model DriveCrmEvent {
 
   @@index([driverId, eventType, createdAt])
   @@index([driverId, eventType, incidentStatus])
+  @@index([correctsEventId])
+}
+
+// ============================================================================
+// Market Acquisition Contractors — Driver/Passenger/Delivery-Business
+// acquisition + Delivery CRM. See docs/AGENT_CONSTITUTION.md s.3 and
+// docs/RT_ORGANIZATION.md s.6 for the full boundary writeup.
+//
+// RT OFFICE DOES NOT SEARCH FOR DRIVERS: the contractors create supply/demand
+// flow, RT OFFICE (existing, unchanged) manages verified supply. None of the
+// models below are a second Driver/Passenger/Shipment/Partner source of
+// truth — DRIVER_CONTRACTOR reuses ScoutCandidate (SCOUT's existing model)
+// for driver prospects rather than inventing a competing one; only
+// PassengerProspect and BusinessProspect are genuinely new identities (no
+// existing model covers "someone who might become a passenger/delivery
+// customer but hasn't yet").
+// ============================================================================
+
+// Shared across all three acquisition sources — mirrors ScoutSourceType but
+// is intentionally its own enum (not reused) since PUBLIC_AD covers business
+// advertisement sourcing that has no Scout equivalent, and coupling it to
+// Scout's enum would make a future Scout-only addition leak into contractors
+// that have nothing to do with driver sightings.
+enum AcquisitionSourceType {
+  TELEGRAM_GROUP
+  WHATSAPP_GROUP
+  LALAFO
+  PUBLIC_AD
+  MANUAL_IMPORT
+  INTERNAL
+}
+
+enum AcquisitionProspectType {
+  DRIVER
+  PASSENGER
+  BUSINESS
+}
+
+// Master spec s.5's honesty requirement: an outreach adapter must never
+// report a fabricated successful send. SENT is real-delivery-confirmed;
+// DRY_RUN/SANDBOX/NO_PROVIDER_CONFIGURED are all honest non-delivery states,
+// never silently coerced into SENT.
+enum OutreachStatus {
+  SENT
+  DRY_RUN
+  SANDBOX
+  NO_PROVIDER_CONFIGURED
+  RATE_LIMITED
+  DUPLICATE
+  DO_NOT_CONTACT
+  FAILED
+}
+
+enum PassengerProspectStatus {
+  NEW
+  CONTACTED
+  QUALIFIED
+  CONVERTED // became a real passenger via Mira — see passenger-contractor/bridge.ts
+  DECLINED
+  SPAM
+}
+
+enum BusinessCategory {
+  GROCERY
+  HOUSEHOLD_GOODS
+  CLOTHING
+  ELECTRONICS
+  AUTO_GOODS
+  BUILDING_MATERIALS
+  FURNITURE
+  FLOWERS
+  PHARMACY
+  MARKET_SELLER
+  SOCIAL_COMMERCE
+  ONLINE_STORE
+  WHOLESALE
+  RETAIL
+  OTHER
+}
+
+enum BusinessProspectStatus {
+  PROSPECT
+  CONTACTED
+  QUALIFIED
+  PARTNERED
+  DECLINED
+  CHURNED
+}
+
+enum DeliveryCrmEventType {
+  OUTREACH_SENT
+  QUALIFIED
+  PARTNERSHIP_AGREED
+  HANDOFF_TO_OPERATIONS // business is now live in Sapar's operational delivery flow
+  LAST_MILE_STATUS
+  COMPLETION
+  INCIDENT
+  CORRECTION
+}
+
+// Shared, append-only outreach ledger — infrastructure like AuditLogEntry,
+// not an exclusive business capability, so all three contractors may append
+// to it without a capabilities collision (see src/lib/artur/collisions.ts).
+// Provides the master spec s.5 safety set in one place: idempotency
+// (idempotencyKey unique), dedup + rate-limiting (query by prospectType +
+// prospectRef + createdAt), do-not-contact (doNotContact flag persists once
+// set), and source traceability (sourceType/sourceRef always recorded).
+model AcquisitionOutreachEvent {
+  id              String                  @id @default(cuid())
+  contractorAgent AgentName
+  prospectType    AcquisitionProspectType
+  // Loose correlation id (ScoutCandidate.id / PassengerProspect.id /
+  // BusinessProspect.id) — deliberately not a Prisma relation so this shared
+  // log never becomes a write path onto any prospect model directly.
+  prospectRef     String
+  channel         Channel
+  sourceType      AcquisitionSourceType
+  sourceRef       String? // e.g. TelegramGroup id or free-text source label
+  status          OutreachStatus
+  messageSummary  String // never the full message body verbatim — audit-safe summary only
+  doNotContact    Boolean                 @default(false)
+  idempotencyKey  String                  @unique
+  createdAt       DateTime                @default(now())
+
+  @@index([prospectType, prospectRef, createdAt])
+  @@index([contractorAgent, createdAt])
+}
+
+// PASSENGER_CONTRACTOR's exclusive write surface — a prospect who has shown
+// passenger-shaped intent on a permitted public source but has not yet
+// messaged RT directly. Deliberately NOT a TripRequest/Passenger row: those
+// stay Mira/RT Core's exclusive write surface, created only once the real
+// person actually messages RT (spec: "Passenger -> handoff to Mira").
+model PassengerProspect {
+  id                     String                  @id @default(cuid())
+  sourceType             AcquisitionSourceType
+  sourceGroupId          String?
+  sourceText             String
+  rawPhone               String?
+  rawTelegramUsername    String?
+  rawRouteText           String?
+  rawOriginStopId        String?
+  rawDestinationStopId   String?
+  rawTravelDate          DateTime?               @db.Date
+  normalizedPhone        String?
+  status                 PassengerProspectStatus @default(NEW)
+  convertedTripRequestId String? // loose correlation id, set only after a real TripRequest exists — see bridge.ts
+  createdAt              DateTime                @default(now())
+  updatedAt              DateTime                @updatedAt
+
+  @@index([status, createdAt])
+  @@index([normalizedPhone])
+}
+
+// DELIVERY_CONTRACTOR's exclusive write surface for identity/lifecycle.
+// Explicitly distinct from Partner (RT's logistics/fleet partner directory)
+// and Shipment (Sapar's individual cargo execution record) — this tracks the
+// business RELATIONSHIP (prospect -> qualified -> partnered), never an
+// individual delivery order.
+model BusinessProspect {
+  id                    String                 @id @default(cuid())
+  sourceType            AcquisitionSourceType
+  sourceRef             String?
+  sourceText            String
+  businessName          String?
+  category              BusinessCategory
+  contactPhone          String?
+  contactHandle         String?
+  deliveryPotentialNote String?
+  status                BusinessProspectStatus @default(PROSPECT)
+  linkedPartnerId       String? // set once ops onboards them as a real Partner row (RT Network) — loose correlation id, never a relation (Partner stays RT Network's own write surface)
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+  events                DeliveryCrmEvent[]
+
+  @@index([status, createdAt])
+  @@index([category, status])
+}
+
+// Delivery CRM's own append-only event log — same append-only/CORRECTION
+// pattern as CRM Auto's DriveCrmEvent. Never a second Sapar execution
+// engine: SAPAR remains cargo/delivery operational execution owner: once a
+// HANDOFF_TO_OPERATIONS event is appended, actual shipments flow through
+// Sapar's existing Shipment model, not through this log.
+model DeliveryCrmEvent {
+  id                 String               @id @default(cuid())
+  businessProspectId String
+  businessProspect   BusinessProspect     @relation(fields: [businessProspectId], references: [id])
+  eventType          DeliveryCrmEventType
+  details            Json?
+  source             String
+  correctsEventId    String?
+  idempotencyKey     String               @unique
+  createdAt          DateTime             @default(now())
+
+  @@index([businessProspectId, eventType, createdAt])
   @@index([correctsEventId])
 }

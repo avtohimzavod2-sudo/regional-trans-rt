@@ -24,6 +24,9 @@ import { TYYIN_AGENT_CONTRACT } from "@/lib/tyyin/orchestrator";
 import { ARTUR_AGENT_CONTRACT } from "@/lib/artur/orchestrator";
 import { RT_OFFICE_AGENT_CONTRACT } from "@/lib/rt-office/orchestrator";
 import { CRM_AUTO_AGENT_CONTRACT } from "@/lib/crm-auto/orchestrator";
+import { DRIVER_CONTRACTOR_AGENT_CONTRACT } from "@/lib/driver-contractor/orchestrator";
+import { PASSENGER_CONTRACTOR_AGENT_CONTRACT } from "@/lib/passenger-contractor/orchestrator";
+import { DELIVERY_CONTRACTOR_AGENT_CONTRACT } from "@/lib/delivery-contractor/orchestrator";
 
 export const AGENT_REGISTRY: AgentContract[] = [
   MIRA_AGENT_CONTRACT,
@@ -35,6 +38,9 @@ export const AGENT_REGISTRY: AgentContract[] = [
   ARTUR_AGENT_CONTRACT,
   RT_OFFICE_AGENT_CONTRACT,
   CRM_AUTO_AGENT_CONTRACT,
+  DRIVER_CONTRACTOR_AGENT_CONTRACT,
+  PASSENGER_CONTRACTOR_AGENT_CONTRACT,
+  DELIVERY_CONTRACTOR_AGENT_CONTRACT,
   COMMAND_AGENT_CONTRACT,
   PASSENGER_AGENT_CONTRACT,
   DRIVER_AGENT_CONTRACT,

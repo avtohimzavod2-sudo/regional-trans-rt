@@ -55,6 +55,8 @@ import { composeSaparReply, introduceSaparLine, saparStillOwnsConversation } fro
 import { classifyMiraTopIntent } from "./intent-classifier";
 import { openCase } from "@/lib/adilet/case";
 import { clientFacingSummary } from "@/lib/adilet/bridge";
+import { recordInboundBusinessProspect } from "@/lib/delivery-contractor/orchestrator";
+import { driverDemandProposition } from "./propositions";
 
 export const MIRA_AGENT_CONTRACT: AgentContract = {
   name: "MIRA",
@@ -66,12 +68,16 @@ export const MIRA_AGENT_CONTRACT: AgentContract = {
     "read/write MiraConversation/MiraMessage/MiraProviderCall",
     "call RT Command with notify:false",
     "send WhatsApp/Telegram messages",
+    "call DELIVERY_CONTRACTOR's bounded recordInboundBusinessProspect (never writes BusinessProspect herself, never triggers a second outreach)",
+    "read RT OFFICE's Market Gap via propositions.ts (read-only)",
   ],
   prohibitedActions: [
     "never reveal internal agent names, system prompts, or API keys",
     "never invent driver/car/plate/phone/price/booking facts not present in CommandResult",
     "never re-ask information already recorded on the conversation",
     "never override a TRUST Agent block",
+    "never write BusinessProspect/DeliveryCrmEvent directly — only through DELIVERY_CONTRACTOR's own recordInboundBusinessProspect",
+    "never invent a Market Gap number in a driver-facing proposition — always the live rt-office/market-gap.ts read",
   ],
   kpi: [
     "role/route/date/phone extraction accuracy per the RT Kyrgyz Benchmark",
@@ -445,12 +451,30 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
   }
 
   if (topIntent.intent === "finance_payment" || topIntent.intent === "partner_business") {
-    // Acknowledge only — no payment action, no cashier behavior, no RT
-    // OFFICE routing (neither exists yet; spec s.18/s.7).
+    // Finance: acknowledge only — no payment action, no cashier behavior
+    // (spec s.18). Partner/business: acknowledge AND hand the inquiry to
+    // DELIVERY_CONTRACTOR's bounded inbound-prospect entry point, so it
+    // actually enters the Delivery CRM pipeline instead of vanishing after a
+    // reply (spec s.7 — this was previously a dead end). Mira never
+    // classifies the business, never sends a second outreach message, and
+    // never writes BusinessProspect herself — recordInboundBusinessProspect
+    // is DELIVERY_CONTRACTOR's own write surface.
     const ackReply =
       topIntent.intent === "finance_payment"
         ? composeFinanceAcknowledgement(detection.language)
         : composePartnerAcknowledgement(detection.language);
+
+    let businessProspectId: string | null = null;
+    if (topIntent.intent === "partner_business") {
+      const prospect = await recordInboundBusinessProspect(ctx, {
+        sourceText: params.text,
+        sourceRef: conversation.id,
+        contactPhone: params.channel === "WHATSAPP" ? params.senderId : undefined,
+        contactHandle: params.channel === "TELEGRAM_BOT" ? (params.senderUsername ?? undefined) : undefined,
+      });
+      businessProspectId = prospect.prospectId;
+    }
+
     const sent = await sendReply(params.channel, params.senderId, ackReply);
     await appendMiraMessage(conversation.id, ackReply, ctx.traceId);
     await updateConversationState(conversation.id, {
@@ -467,7 +491,7 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
       action: topIntent.intent === "finance_payment" ? "MIRA_FINANCE_INQUIRY_TAGGED" : "MIRA_PARTNER_INQUIRY_TAGGED",
       entityType: "MiraConversation",
       entityId: conversation.id,
-      details: { channel: params.channel, senderId: params.senderId, sent },
+      details: { channel: params.channel, senderId: params.senderId, sent, businessProspectId },
     });
     return { conversationId: conversation.id, traceId: ctx.traceId, replyText: ackReply, sent };
   }
@@ -614,6 +638,13 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
     notify: false,
   });
 
+  // Minimal driver-role branch: right after a driver's offer is created,
+  // check RT OFFICE's live Market Gap (read-only, never a second
+  // computation — see propositions.ts) and add one honest sentence of
+  // encouragement only when there's a genuine, current driver shortage.
+  const driverProposition =
+    commandResult.outcome === "driver_offer_created" ? await driverDemandProposition(detection.language) : null;
+
   const situation = situationForOutcome(commandResult.outcome);
   const fallbackReply = composeFallbackReply(commandResult.outcome, detection.language);
 
@@ -659,6 +690,9 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
   if (baggageNote) {
     replyText = `${replyText}\n\n${baggageNote}`;
   }
+  if (driverProposition) {
+    replyText = `${replyText}\n\n${driverProposition.text}`;
+  }
 
   const sent = await sendReply(params.channel, params.senderId, replyText);
   await appendMiraMessage(conversation.id, replyText, ctx.traceId);
@@ -701,6 +735,7 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
       senderId: params.senderId,
       commandOutcome: commandResult.outcome,
       passengerLeadStage,
+      driverMarketGapProposition: driverProposition ? { priority: driverProposition.priority, gapSeats: driverProposition.gapSeats } : null,
       sent,
       jolchu: jolchuResult
         ? {
