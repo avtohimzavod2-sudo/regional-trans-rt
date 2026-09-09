@@ -14,6 +14,10 @@ export const MATCH_AGENT_CONTRACT: AgentContract = {
   prohibitedActions: ["never propose a match with insufficient seats or a different travel date", "never propose more than one active match per request/offer at a time"],
   kpi: ["% of requests matched within their time window", "average time-to-match"],
   escalationRules: ["QUALITY Agent independently re-validates proposals; a flagged proposal should be reviewed before it reaches TRUST's contact-reveal stage"],
+  // Driver/passenger notifications about a Match go through Mira's outbound
+  // boundary (src/lib/mira/outbound.ts) rather than a second public persona —
+  // MATCH itself never owns external_customer_communication.
+  forbiddenCapabilities: ["external_customer_communication"],
 };
 
 export async function matchRequest(ctx: AgentContext, requestId: string) {

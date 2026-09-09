@@ -292,6 +292,128 @@ describe("handleMiraInbound — confirmation gate + activeSpecialist handoff (Mi
   });
 });
 
+// Spec s.6/Test 8/Test 9/Test 10 — Jolchu honesty gate + honest coverage-gap
+// distinction. jolchuResult starts every test as unset (undefined return
+// from resolveRouteIntelligenceMock, which vi.clearAllMocks() resets to a
+// bare vi.fn() with no default), so each case below explicitly arranges the
+// mocked RouteIntelligenceResult it needs.
+describe("handleMiraInbound — Jolchu honesty gate (spec s.6, Test 8/Test 9)", () => {
+  const JOLCHU_TRIGGER_TEXT = "Какой маршрут от Бишкека до Токмока, сколько км?";
+
+  function jolchuFixture(overrides: Partial<{ status: "RESOLVED" | "NEEDS_CONFIRMATION" | "PARTIAL" | "FAILED"; errorMessage: string | null }>) {
+    return {
+      requestId: "jr_1",
+      status: "RESOLVED" as const,
+      origin: null,
+      destination: null,
+      waypoints: [],
+      route: null,
+      confidence: 0.9,
+      ambiguity: false,
+      ambiguityCandidates: null,
+      warnings: [],
+      requiresHumanOrUserConfirmation: false,
+      errorMessage: null,
+      ...overrides,
+    };
+  }
+
+  it("Test 8 — NEEDS_CONFIRMATION short-circuits with a clarification request, never reaching RT Command", async () => {
+    sessionMocks.getOrCreateActiveConversation.mockResolvedValue(conversationFixture("MIRA"));
+    resolveRouteIntelligenceMock.mockResolvedValue(jolchuFixture({ status: "NEEDS_CONFIRMATION" }));
+
+    const result = await handleMiraInbound({ ...BASE_PARAMS, text: JOLCHU_TRIGGER_TEXT });
+
+    expect(handleInboundMessageMock).not.toHaveBeenCalled();
+    expect(result.replyText).toMatch(/маршрут/i);
+    expect(sessionMocks.updateConversationState).toHaveBeenCalledWith(
+      "conv_1",
+      expect.objectContaining({ status: "AWAITING_USER", activeIntent: "route_clarification_needed" }),
+    );
+    expect(logAgentActionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "MIRA_JOLCHU_HONESTY_GATE", details: expect.objectContaining({ status: "NEEDS_CONFIRMATION" }) }),
+    );
+  });
+
+  it("Test 9 — FAILED (e.g. both route providers unavailable) honestly reports a service outage, never inventing a distance/ETA", async () => {
+    sessionMocks.getOrCreateActiveConversation.mockResolvedValue(conversationFixture("MIRA"));
+    resolveRouteIntelligenceMock.mockResolvedValue(jolchuFixture({ status: "FAILED", errorMessage: "all providers unavailable" }));
+
+    const result = await handleMiraInbound({ ...BASE_PARAMS, text: JOLCHU_TRIGGER_TEXT });
+
+    expect(handleInboundMessageMock).not.toHaveBeenCalled();
+    expect(result.replyText).not.toMatch(/\d+\s*(км|min|мин)/i);
+    expect(sessionMocks.updateConversationState).toHaveBeenCalledWith(
+      "conv_1",
+      expect.objectContaining({ status: "AWAITING_USER", activeIntent: "route_clarification_needed" }),
+    );
+    expect(logAgentActionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "MIRA_JOLCHU_HONESTY_GATE",
+        details: expect.objectContaining({ status: "FAILED", errorMessage: "all providers unavailable" }),
+      }),
+    );
+  });
+
+  it("RESOLVED lets the flow continue into RT Command instead of short-circuiting", async () => {
+    sessionMocks.getOrCreateActiveConversation.mockResolvedValue(conversationFixture("MIRA"));
+    resolveRouteIntelligenceMock.mockResolvedValue(jolchuFixture({ status: "RESOLVED" }));
+    handleInboundMessageMock.mockResolvedValue({
+      traceId: "cmd_trace_1",
+      routedTo: ["COMMAND"],
+      outcome: "trip_request_created",
+    } satisfies CommandResult);
+    providerReplyMock.mockResolvedValue({ text: "Записала вашу поездку." });
+
+    await handleMiraInbound({ ...BASE_PARAMS, text: JOLCHU_TRIGGER_TEXT });
+
+    expect(handleInboundMessageMock).toHaveBeenCalledTimes(1);
+    expect(logAgentActionMock).not.toHaveBeenCalledWith(expect.objectContaining({ action: "MIRA_JOLCHU_HONESTY_GATE" }));
+  });
+
+  it("Test 10 — honest coverage gap: Jolchu resolved the real geography but RT Command's corridor-constrained extractor still couldn't place it", async () => {
+    sessionMocks.getOrCreateActiveConversation.mockResolvedValue(conversationFixture("MIRA"));
+    resolveRouteIntelligenceMock.mockResolvedValue(jolchuFixture({ status: "RESOLVED" }));
+    handleInboundMessageMock.mockResolvedValue({
+      traceId: "cmd_trace_1",
+      routedTo: ["COMMAND"],
+      outcome: "unrecognized",
+    } satisfies CommandResult);
+
+    const result = await handleMiraInbound({ ...BASE_PARAMS, text: JOLCHU_TRIGGER_TEXT });
+
+    expect(result.replyText).not.toBe(""); // deterministic fallback used (mock provider returns "")
+    expect(logAgentActionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "MIRA_ROUTE_COVERAGE_GAP", entityType: "MiraConversation" }),
+    );
+  });
+
+  it("does not report a coverage gap when RT Command actually recognized the request (RESOLVED + recognized outcome)", async () => {
+    sessionMocks.getOrCreateActiveConversation.mockResolvedValue(conversationFixture("MIRA"));
+    resolveRouteIntelligenceMock.mockResolvedValue(jolchuFixture({ status: "RESOLVED" }));
+    handleInboundMessageMock.mockResolvedValue({
+      traceId: "cmd_trace_1",
+      routedTo: ["COMMAND"],
+      outcome: "trip_request_created",
+    } satisfies CommandResult);
+    providerReplyMock.mockResolvedValue({ text: "Записала вашу поездку." });
+
+    await handleMiraInbound({ ...BASE_PARAMS, text: JOLCHU_TRIGGER_TEXT });
+
+    expect(logAgentActionMock).not.toHaveBeenCalledWith(expect.objectContaining({ action: "MIRA_ROUTE_COVERAGE_GAP" }));
+  });
+
+  it("does not report a coverage gap when the extractor failed for an unrelated reason (Jolchu was never required, jolchuResult stays null)", async () => {
+    sessionMocks.getOrCreateActiveConversation.mockResolvedValue(conversationFixture("MIRA"));
+    handleInboundMessageMock.mockResolvedValue({ traceId: "cmd_trace_1", routedTo: [], outcome: "unrecognized" } satisfies CommandResult);
+
+    await handleMiraInbound({ ...BASE_PARAMS, text: "Здравствуйте" });
+
+    expect(resolveRouteIntelligenceMock).not.toHaveBeenCalled();
+    expect(logAgentActionMock).not.toHaveBeenCalledWith(expect.objectContaining({ action: "MIRA_ROUTE_COVERAGE_GAP" }));
+  });
+});
+
 describe("handleMiraInbound — RT Command fallback (plain passenger text)", () => {
   it("dispatches to RT Command with notify:false and sets activeSpecialist=MIRA explicitly", async () => {
     sessionMocks.getOrCreateActiveConversation.mockResolvedValue(conversationFixture("MIRA"));

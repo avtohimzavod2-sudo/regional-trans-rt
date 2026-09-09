@@ -68,6 +68,36 @@ const DECLINE_REASON_ACK: Templates = {
   EN: "Got it, thank you! I'll look for another suitable driver for you.",
 };
 
+// Jolchu honesty (spec s.6/Test 8) — the route-intelligence check came back
+// NEEDS_CONFIRMATION or PARTIAL: the geography named in the message is
+// ambiguous or only partly resolved. Mira must ask, never guess an origin,
+// destination, distance, or ETA from it.
+const JOLCHU_CLARIFICATION_NEEDED: Templates = {
+  KY: "Так түшүнө элекмин, кайдан жана кайда бараарыңызды бир аз тактап бере аласызбы? Мисалы, шаар/айылдын так атын жазыңыз.",
+  RU: "Не совсем уверена, что правильно поняла маршрут — уточните, пожалуйста, точное название города/села отправления и назначения.",
+  EN: "I'm not fully sure I understood the route — could you confirm the exact origin and destination city/village names?",
+};
+
+// Jolchu honesty (spec s.6/Test 9) — the route-intelligence check came back
+// FAILED (e.g. both route providers unavailable). Mira must say so honestly
+// rather than inventing distance/ETA/traffic from nothing.
+const ROUTE_SERVICE_UNAVAILABLE: Templates = {
+  KY: "Учурда маршрутту так текшере албай жатам (кызмат убактылуу жеткиликсиз). Бир аздан кийин кайра аракет кылыңызчы же так дарек/аталышты жазыңыз.",
+  RU: "Сейчас не получается точно проверить маршрут — сервис временно недоступен. Попробуйте ещё раз чуть позже или напишите точное название населённого пункта.",
+  EN: "I can't verify the route right now — the route service is temporarily unavailable. Please try again shortly, or give me the exact place names.",
+};
+
+// Honest coverage-gap (spec s.7/Test 10) — Jolchu genuinely understood the
+// real-world geography (status RESOLVED), but RT Core has no structured
+// corridor/stop covering it yet. This is a distinct, honest state from
+// "I didn't understand your message" — never silently mapped onto whatever
+// corridor RT happens to operate today.
+const ROUTE_NOT_YET_COVERED: Templates = {
+  KY: "Сиз айткан багытты түшүндүм, бирок RT азырынча так ушул багытта иштебейт. Жеткиликтүү багыттарды тактап берейинби?",
+  RU: "Поняла ваш маршрут, но RT пока не работает именно по этому направлению. Подсказать, какие направления сейчас доступны?",
+  EN: "I understood the route you mean, but RT doesn't yet operate that exact route. Want me to tell you which routes are currently available?",
+};
+
 function pick(t: Templates, language: Language): string {
   return t[language] ?? t.RU;
 }
@@ -132,6 +162,36 @@ export function composePartnerAcknowledgement(language: Language): string {
  * captured (spec s.12) — closes the exchange, never re-asks. */
 export function composeDeclineReasonAcknowledgement(language: Language): string {
   return pick(DECLINE_REASON_ACK, language);
+}
+
+/** Deterministic clarification request when Jolchu's route intelligence came
+ * back NEEDS_CONFIRMATION or PARTIAL (spec s.6/Test 8) — never a confident
+ * route/ETA built from ambiguous or incomplete geography. */
+export function composeJolchuClarificationReply(language: Language): string {
+  return pick(JOLCHU_CLARIFICATION_NEEDED, language);
+}
+
+/** Deterministic honest reply when Jolchu's route intelligence came back
+ * FAILED, e.g. both route providers unavailable (spec s.6/Test 9) — never a
+ * fabricated distance/ETA/traffic fact. */
+export function composeRouteServiceUnavailableReply(language: Language): string {
+  return pick(ROUTE_SERVICE_UNAVAILABLE, language);
+}
+
+/** Deterministic honest coverage-gap reply (spec s.7/Test 10): Jolchu
+ * resolved real geography but RT Core has no structured corridor/stop for
+ * it — distinct from "I didn't understand your message" and never silently
+ * mapped onto an unrelated corridor RT does operate. */
+export function composeRouteNotYetCoveredReply(language: Language): string {
+  return pick(ROUTE_NOT_YET_COVERED, language);
+}
+
+/** Situation text for the honest coverage-gap case (spec s.7/Test 10): Jolchu
+ * resolved the geography but RT Core has no structured corridor/stop for it.
+ * Kept distinct from situationForOutcome("unrecognized") so a free-generated
+ * reply, if used, doesn't imply Mira simply failed to parse the message. */
+export function routeNotYetCoveredSituation(): string {
+  return "Mira understood the real route the user described, but RT does not currently operate that exact route/corridor. Mira should say this honestly and never imply she misunderstood the message or invent an alternative route/ETA.";
 }
 
 /** Short internal situation description handed to the AI provider so it can

@@ -4,26 +4,38 @@ import { extractTripMessage, type StopContext } from "@/lib/nlp/extract";
 import { messages, detectLangFallback, type Lang } from "@/lib/i18n/messages";
 import { sendTelegramDirectMessage, sendTelegramMessage } from "@/lib/messaging/telegram";
 import { sendWhatsAppText } from "@/lib/messaging/whatsapp";
-import { proposeMatchesForOffer, proposeMatchesForRequest } from "@/lib/matching/orchestrate";
+import { proposeMatchesForRequest } from "@/lib/matching/orchestrate";
+import { notifySupplyAvailable, resolveSupplyForDispatcher } from "@/lib/rt-office/orchestrator";
+import { rootContext, logAgentAction } from "@/lib/agents/trace";
 
 // Kyrgyzstan does not observe DST; Asia/Bishkek is a fixed UTC+6 offset.
 const BISHKEK_OFFSET = "+06:00";
 
-const PILOT_CORRIDOR_KEY = "bishkek-karakol";
+// A Stop's `key` (e.g. "bishkek") is only unique within its own corridor
+// (schema: @@unique([corridorId, key])) — RT now operates more than one
+// corridor, so the flat list handed to NLP extraction must disambiguate
+// stops that share a key across corridors. The composite "<corridorKey>:<stopKey>"
+// is an opaque identifier as far as extraction is concerned (extract.ts never
+// parses it, only matches it back verbatim) and is unpacked again in
+// resolveStopIdByKey below.
+function compositeStopKey(corridorKey: string, stopKey: string): string {
+  return `${corridorKey}:${stopKey}`;
+}
 
-export async function getPilotCorridorStops(): Promise<StopContext[]> {
-  const corridor = await db.corridor.findUnique({
-    where: { key: PILOT_CORRIDOR_KEY },
+export async function getActiveCorridorStops(): Promise<StopContext[]> {
+  const corridors = await db.corridor.findMany({
+    where: { isActive: true },
     include: { stops: { orderBy: { order: "asc" } } },
   });
-  if (!corridor) return [];
-  return corridor.stops.map((s) => ({
-    key: s.key,
-    nameRu: s.nameRu,
-    nameKy: s.nameKy,
-    nameEn: s.nameEn,
-    aliases: s.aliases,
-  }));
+  return corridors.flatMap((corridor) =>
+    corridor.stops.map((s) => ({
+      key: compositeStopKey(corridor.key, s.key),
+      nameRu: s.nameRu,
+      nameKy: s.nameKy,
+      nameEn: s.nameEn,
+      aliases: s.aliases,
+    })),
+  );
 }
 
 function parseTravelDate(iso: string | null): Date | null {
@@ -48,13 +60,18 @@ async function findOrCreateDriver(telegramUserId: string, telegramUsername: stri
   });
 }
 
-async function resolveStopIdByKey(key: string, corridorKey = PILOT_CORRIDOR_KEY): Promise<string | null> {
-  const stop = await db.stop.findFirst({ where: { key, corridor: { key: corridorKey } } });
+async function resolveStopIdByKey(compositeKey: string): Promise<string | null> {
+  const separatorIndex = compositeKey.indexOf(":");
+  if (separatorIndex === -1) return null;
+  const corridorKey = compositeKey.slice(0, separatorIndex);
+  const stopKey = compositeKey.slice(separatorIndex + 1);
+
+  const stop = await db.stop.findFirst({ where: { key: stopKey, corridor: { key: corridorKey, isActive: true } } });
   return stop?.id ?? null;
 }
 
 export async function ingestPassengerMessage(whatsappId: string, text: string, rawMessageId?: string, notify = true) {
-  const stops = await getPilotCorridorStops();
+  const stops = await getActiveCorridorStops();
   const { result, origin, destination } = await extractTripMessage({
     text,
     stops,
@@ -124,7 +141,23 @@ export async function ingestPassengerMessage(whatsappId: string, text: string, r
     );
   }
 
-  await proposeMatchesForRequest(request.id);
+  const match = await proposeMatchesForRequest(request.id);
+  if (!match) {
+    // Spec s.8 — RT OFFICE must be the one to recognize (and audit) that no
+    // verified supply exists yet for this request, distinct from MATCH's own
+    // silent "no candidate" outcome. Re-reads the same live tables (no second
+    // matching engine, no invented facts) purely to make the gap observable.
+    const ctx = rootContext();
+    const supply = await resolveSupplyForDispatcher(request.id);
+    await logAgentAction({
+      ctx,
+      agent: "RT_OFFICE",
+      action: "rt_office.no_verified_supply_yet",
+      entityType: "TripRequest",
+      entityId: request.id,
+      details: { hasCandidateSupply: supply.hasCandidateSupply },
+    });
+  }
   return request;
 }
 
@@ -135,7 +168,7 @@ export async function ingestDriverPrivateMessage(
   rawMessageId?: string,
   notify = true,
 ) {
-  const stops = await getPilotCorridorStops();
+  const stops = await getActiveCorridorStops();
   const { result, origin, destination } = await extractTripMessage({
     text,
     stops,
@@ -204,7 +237,12 @@ export async function ingestDriverPrivateMessage(
   }
 
   if (driver.status === "ACTIVE") {
-    await proposeMatchesForOffer(offer.id);
+    // Spec s.8 — RT OFFICE, not this ingest path, owns "supply reported"
+    // recognition; it re-triggers RT Core's existing MATCH agent itself
+    // (agents/match.ts -> matching/orchestrate.ts) rather than this file
+    // calling MATCH directly, so there's exactly one entrypoint for reacting
+    // to newly-available supply regardless of how it was reported.
+    await notifySupplyAvailable({ offerId: offer.id, reportedBy: "DRIVER_REPORT" });
   }
   return offer;
 }
@@ -216,7 +254,7 @@ export async function ingestAllowedGroupMessage(params: {
   senderUsername: string | null;
   text: string;
 }) {
-  const stops = await getPilotCorridorStops();
+  const stops = await getActiveCorridorStops();
   const { result } = await extractTripMessage({ text: params.text, stops, hint: "UNKNOWN", today: new Date() });
   const lang = (result.language ?? detectLangFallback(params.text)) as Lang;
 

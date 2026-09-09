@@ -29,7 +29,11 @@ import {
   composeDeclineReasonAcknowledgement,
   composeFallbackReply,
   composeFinanceAcknowledgement,
+  composeJolchuClarificationReply,
   composePartnerAcknowledgement,
+  composeRouteNotYetCoveredReply,
+  composeRouteServiceUnavailableReply,
+  routeNotYetCoveredSituation,
   situationForOutcome,
 } from "./reply-templates";
 import { mapQuickRoleToMiraRole, mergeMiraNormalizedFields } from "./types";
@@ -528,6 +532,43 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
     }
   }
 
+  // Jolchu honesty gate (spec s.6/Test 8/Test 9): only a RESOLVED result may
+  // let the flow continue into RT Command. NEEDS_CONFIRMATION/PARTIAL mean
+  // the geography is ambiguous or incomplete — Mira must ask, never build a
+  // confident TripRequest from it. FAILED means Jolchu itself could not
+  // verify the geography (e.g. both route providers unavailable) — Mira must
+  // say so honestly rather than falling through to an extractor that has no
+  // real route data behind it either. A jolchuResult of null means Jolchu was
+  // never required for this message (decideJolchuRouting said so, or the
+  // call threw and was swallowed above as a pure-enrichment failure) — in
+  // that case there is nothing to gate on and the flow proceeds as before.
+  if (jolchuResult && jolchuResult.status !== "RESOLVED") {
+    const replyText =
+      jolchuResult.status === "FAILED"
+        ? composeRouteServiceUnavailableReply(detection.language)
+        : composeJolchuClarificationReply(detection.language);
+
+    const sent = await sendReply(params.channel, params.senderId, replyText);
+    await appendMiraMessage(conversation.id, replyText, ctx.traceId);
+    await updateConversationState(conversation.id, {
+      detectedLanguage: detection.language,
+      status: "AWAITING_USER",
+      activeIntent: "route_clarification_needed",
+      lastAgentDecision: `mira_jolchu_${jolchuResult.status.toLowerCase()}`,
+      lastTraceId: ctx.traceId,
+      activeSpecialist: "MIRA",
+    });
+    await logAgentAction({
+      ctx,
+      agent: "MIRA",
+      action: "MIRA_JOLCHU_HONESTY_GATE",
+      entityType: "MiraConversation",
+      entityId: conversation.id,
+      details: { status: jolchuResult.status, errorMessage: jolchuResult.errorMessage, channel: params.channel, senderId: params.senderId, sent },
+    });
+    return { conversationId: conversation.id, traceId: ctx.traceId, replyText, sent };
+  }
+
   // Sapar gate: unlike Jolchu (a pure enrichment), a cargo/parcel delivery
   // intent bypasses RT Command entirely (AGENTS spec s.2 — Sapar is the
   // primary handler for delivery messages, not an add-on), since RT
@@ -645,8 +686,29 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
   const driverProposition =
     commandResult.outcome === "driver_offer_created" ? await driverDemandProposition(detection.language) : null;
 
-  const situation = situationForOutcome(commandResult.outcome);
-  const fallbackReply = composeFallbackReply(commandResult.outcome, detection.language);
+  // Honest coverage-gap distinction (spec s.7/Test 10): Jolchu independently
+  // confirmed it understood real geography (RESOLVED — reached this point
+  // rather than being short-circuited by the honesty gate above), yet RT
+  // Command's own corridor/stop extraction still could not match it to a
+  // known Stop. This is not "Mira didn't understand the message" — it is
+  // "RT doesn't operate this route yet" — and must never be silently mapped
+  // onto whatever corridor RT happens to operate today.
+  const isHonestCoverageGap = jolchuResult?.status === "RESOLVED" && commandResult.outcome === "unrecognized";
+  if (isHonestCoverageGap) {
+    await logAgentAction({
+      ctx,
+      agent: "MIRA",
+      action: "MIRA_ROUTE_COVERAGE_GAP",
+      entityType: "MiraConversation",
+      entityId: conversation.id,
+      details: { channel: params.channel, senderId: params.senderId },
+    });
+  }
+
+  const situation = isHonestCoverageGap ? routeNotYetCoveredSituation() : situationForOutcome(commandResult.outcome);
+  const fallbackReply = isHonestCoverageGap
+    ? composeRouteNotYetCoveredReply(detection.language)
+    : composeFallbackReply(commandResult.outcome, detection.language);
 
   let replyText = fallbackReply;
   const replyStarted = Date.now();

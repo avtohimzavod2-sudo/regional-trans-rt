@@ -3,14 +3,14 @@ import { db } from "@/lib/db";
 import { logAction } from "@/lib/audit";
 import { findCandidateOffers, findCandidateRequests } from "./engine";
 import { buildReturnLegOfferInput } from "./queue";
-import { confirmDeclineKeyboard, sendTelegramMessage } from "@/lib/messaging/telegram";
-import { sendWhatsAppConfirmButtons, sendWhatsAppText } from "@/lib/messaging/whatsapp";
+import { confirmDeclineKeyboard, notifyDriverPrivately, notifyPassengerText, notifyPassengerWithConfirmButtons } from "@/lib/mira/outbound";
 import { messages, type Lang } from "@/lib/i18n/messages";
 import type { MatchableOffer, MatchableRequest } from "./types";
 import { rootContext } from "@/lib/agents/trace";
 import { assertSafeToReveal } from "@/lib/agents/trust";
 import { chargeCommissionForTrip, CommissionAlreadyChargedError } from "@/lib/agents/pay";
 import { openSupportCase } from "@/lib/agents/support";
+import { latestOpenBreakdownForDriver, openBreakdownForDrivers } from "@/lib/crm-auto/bridge";
 
 const ACTIVE_MATCH_STATUSES = ["PROPOSED_TO_DRIVER", "AWAITING_DRIVER", "AWAITING_PASSENGER"] as const;
 
@@ -110,7 +110,7 @@ async function proposeToDriver(requestId: string, offerId: string) {
     request.travelDate.toISOString().slice(0, 10),
     request.seats,
   );
-  await sendTelegramMessage(offer.driver.telegramUserId, text, confirmDeclineKeyboard(match.id, "driver"));
+  await notifyDriverPrivately(offer.driver.telegramUserId, text, confirmDeclineKeyboard(match.id, "driver"));
 
   await logAction({
     actorType: "AGENT",
@@ -142,7 +142,15 @@ export async function proposeMatchesForRequest(requestId: string) {
     include: { origin: true, destination: true, driver: true },
   });
 
-  const candidates = findCandidateOffers(toMatchableRequest(request), offers.map(toMatchableOffer));
+  // Verified operational eligibility filter (CRM Auto), applied before the
+  // pure scoring engine sees the candidates — an offer whose driver has a
+  // currently OPEN verified breakdown is not usable supply, regardless of
+  // how well it scores geographically. Batched to avoid one CRM Auto query
+  // per offer.
+  const breakdownByDriver = await openBreakdownForDrivers(offers.map((o) => o.driverId));
+  const operationallyEligibleOffers = offers.filter((o) => !breakdownByDriver.get(o.driverId));
+
+  const candidates = findCandidateOffers(toMatchableRequest(request), operationallyEligibleOffers.map(toMatchableOffer));
   if (candidates.length === 0) return null;
 
   return proposeToDriver(requestId, candidates[0].offer.id);
@@ -157,6 +165,12 @@ export async function proposeMatchesForOffer(offerId: string) {
   });
   if (offer.status !== "OPEN" && offer.status !== "PARTIALLY_FILLED") return null;
   if (offer.driver.status !== "ACTIVE") return null;
+
+  // Same verified operational eligibility filter as proposeMatchesForRequest,
+  // single-driver form: a currently OPEN breakdown means this offer is not
+  // usable supply even though the offer/driver status fields look fine.
+  const { hasOpenBreakdown } = await latestOpenBreakdownForDriver(offer.driverId);
+  if (hasOpenBreakdown) return null;
 
   const excluded = await excludedRequestIdsForOffer(offerId);
   const requests = await db.tripRequest.findMany({
@@ -206,7 +220,7 @@ export async function handleDriverResponse(matchId: string, accepted: boolean) {
     lang,
     match.tripRequest.travelDate.toISOString().slice(0, 10),
   );
-  await sendWhatsAppConfirmButtons(match.tripRequest.passenger.whatsappId, text, matchId);
+  await notifyPassengerWithConfirmButtons(match.tripRequest.passenger.whatsappId, text, matchId);
 
   await logAction({ actorType: "AGENT", action: "match.confirmed_by_driver", entityType: "Match", entityId: matchId });
   return updated;
@@ -236,7 +250,7 @@ export async function handlePassengerResponse(matchId: string, accepted: boolean
     await db.tripRequest.update({ where: { id: match.tripRequestId }, data: { status: "PENDING" } });
     await logAction({ actorType: "AGENT", action: "match.declined_by_passenger", entityType: "Match", entityId: matchId });
     const driverLang = (match.driverOffer.driver.preferredLang ?? "RU") as Lang;
-    await sendTelegramMessage(match.driverOffer.driver.telegramUserId, messages.declinedTryNext[driverLang]);
+    await notifyDriverPrivately(match.driverOffer.driver.telegramUserId, messages.declinedTryNext[driverLang]);
     await proposeMatchesForRequest(match.tripRequestId);
     return db.match.findUniqueOrThrow({ where: { id: matchId } });
   }
@@ -342,7 +356,7 @@ async function revealContacts(matchId: string, tripId: string) {
   const driverLang = (driver.preferredLang ?? "RU") as Lang;
   const passengerLang = (passenger.preferredLang ?? "RU") as Lang;
 
-  await sendTelegramMessage(
+  await notifyDriverPrivately(
     driver.telegramUserId,
     messages.contactRevealedToDriver[driverLang](
       passenger.name ?? "-",
@@ -350,7 +364,7 @@ async function revealContacts(matchId: string, tripId: string) {
       match.tripRequest.pickupPoint,
     ),
   );
-  await sendWhatsAppText(
+  await notifyPassengerText(
     passenger.whatsappId,
     messages.contactRevealedToPassenger[passengerLang](
       driver.name ?? "-",

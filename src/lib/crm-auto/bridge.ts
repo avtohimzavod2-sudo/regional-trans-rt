@@ -47,6 +47,47 @@ export async function latestOpenBreakdownForDriver(driverId: string): Promise<Op
   return { hasOpenBreakdown: !correction };
 }
 
+/** Same rule as latestOpenBreakdownForDriver (latest BREAKDOWN_INCIDENT per
+ * driver, honoring an exceptional CORRECTION without ever mutating the
+ * original row), batched across many drivers in two queries instead of one
+ * findFirst pair per driver — for callers (e.g. matching candidate
+ * filtering) that need this fact for a whole set of drivers at once and
+ * would otherwise run it in an N+1 loop. */
+export async function openBreakdownForDrivers(driverIds: string[]): Promise<Map<string, boolean>> {
+  const uniqueIds = Array.from(new Set(driverIds));
+  if (uniqueIds.length === 0) return new Map();
+
+  const [incidents, corrections] = await Promise.all([
+    db.driveCrmEvent.findMany({
+      where: { driverId: { in: uniqueIds }, eventType: "BREAKDOWN_INCIDENT" },
+      orderBy: { createdAt: "desc" },
+    }),
+    db.driveCrmEvent.findMany({
+      where: { driverId: { in: uniqueIds }, eventType: "CORRECTION" },
+      select: { correctsEventId: true },
+    }),
+  ]);
+
+  const correctedEventIds = new Set(corrections.map((c) => c.correctsEventId));
+  const latestIncidentByDriver = new Map<string, (typeof incidents)[number]>();
+  for (const incident of incidents) {
+    // incidents is ordered by createdAt desc, so the first one seen per
+    // driver is that driver's latest — matching latestOpenBreakdownForDriver's
+    // "most recent row wins" semantics exactly.
+    if (!latestIncidentByDriver.has(incident.driverId)) {
+      latestIncidentByDriver.set(incident.driverId, incident);
+    }
+  }
+
+  const result = new Map<string, boolean>();
+  for (const driverId of uniqueIds) {
+    const latest = latestIncidentByDriver.get(driverId);
+    const hasOpenBreakdown = !!latest && latest.incidentStatus === "OPEN" && !correctedEventIds.has(latest.id);
+    result.set(driverId, hasOpenBreakdown);
+  }
+  return result;
+}
+
 /** RT OFFICE's SupplyFact.etaMinutes/freshness/delayed/arrived, all sourced
  * from the single latest verified ETA event recorded for one specific
  * offer — never a fabricated fallback. */
