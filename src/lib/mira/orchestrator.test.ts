@@ -556,6 +556,104 @@ describe("handleMiraInbound — driver-role Market Gap proposition (task #124, r
   });
 });
 
+// Mira Professional Communication Pass s.6 — toneGuidance was declared on
+// MiraReplyInput and already consumed by the real Gemini provider, but no
+// caller ever set it (confirmed by audit). These tests prove
+// handleMiraInbound now actually computes and passes a non-empty,
+// situation-appropriate toneGuidance into every live provider.reply() call.
+describe("handleMiraInbound — toneGuidance wiring (Mira Professional Communication Pass s.6)", () => {
+  it("passes cancellation-completion tone guidance for cancellation_case_opened", async () => {
+    sessionMocks.getOrCreateActiveConversation.mockResolvedValue(conversationFixture("MIRA"));
+    handleInboundMessageMock.mockResolvedValue({
+      traceId: "cmd_trace_1",
+      routedTo: ["COMMAND", "SUPPORT"],
+      outcome: "cancellation_case_opened",
+    } satisfies CommandResult);
+    providerReplyMock.mockResolvedValue({ text: "Хорошо, ваша поездка отменена." });
+
+    await handleMiraInbound({ ...BASE_PARAMS, text: "Отмените мою поездку" });
+
+    expect(providerReplyMock).toHaveBeenCalledWith(
+      expect.objectContaining({ toneGuidance: expect.stringMatching(/cancellation is already confirmed and complete/i) }),
+    );
+  });
+
+  it("passes clarification tone guidance when understanding requires clarification", async () => {
+    sessionMocks.getOrCreateActiveConversation.mockResolvedValue(conversationFixture("MIRA"));
+    providerUnderstandMock.mockResolvedValue({ ...PASSIVE_UNDERSTANDING, requiresClarification: true });
+    handleInboundMessageMock.mockResolvedValue({ traceId: "cmd_trace_1", routedTo: [], outcome: "unrecognized" } satisfies CommandResult);
+
+    await handleMiraInbound({ ...BASE_PARAMS, text: "Здравствуйте" });
+
+    expect(providerReplyMock).toHaveBeenCalledWith(
+      expect.objectContaining({ toneGuidance: expect.stringMatching(/ask for only the missing information/i) }),
+    );
+  });
+
+  it("passes route-not-yet-covered tone guidance for the honest coverage-gap case (Test 10)", async () => {
+    sessionMocks.getOrCreateActiveConversation.mockResolvedValue(conversationFixture("MIRA"));
+    resolveRouteIntelligenceMock.mockResolvedValue({
+      requestId: "jr_1",
+      status: "RESOLVED" as const,
+      origin: null,
+      destination: null,
+      waypoints: [],
+      route: null,
+      confidence: 0.9,
+      ambiguity: false,
+      ambiguityCandidates: null,
+      warnings: [],
+      requiresHumanOrUserConfirmation: false,
+      errorMessage: null,
+    });
+    handleInboundMessageMock.mockResolvedValue({
+      traceId: "cmd_trace_1",
+      routedTo: ["COMMAND"],
+      outcome: "unrecognized",
+    } satisfies CommandResult);
+
+    await handleMiraInbound({ ...BASE_PARAMS, text: "Какой маршрут от Бишкека до Токмока, сколько км?" });
+
+    expect(providerReplyMock).toHaveBeenCalledWith(
+      expect.objectContaining({ toneGuidance: expect.stringMatching(/doesn't operate this route yet/i) }),
+    );
+  });
+
+  it("passes demand-encouragement tone guidance for driver_offer_created when the live Market Gap shows a genuine shortage", async () => {
+    sessionMocks.getOrCreateActiveConversation.mockResolvedValue(conversationFixture("MIRA"));
+    handleInboundMessageMock.mockResolvedValue({
+      traceId: "cmd_trace_1",
+      routedTo: ["COMMAND"],
+      outcome: "driver_offer_created",
+    } satisfies CommandResult);
+    providerReplyMock.mockResolvedValue({ text: "Записала вашу поездку, ищу пассажира." });
+    driverDemandPropositionMock.mockResolvedValue({ text: "Сейчас много пассажиров на платформе.", priority: "HIGH_DRIVER_ACQUISITION_NEED", gapSeats: -14 });
+
+    await handleMiraInbound({ ...BASE_PARAMS, text: "Из Бишкека в Ош, 4 места, завтра" });
+
+    expect(providerReplyMock).toHaveBeenCalledWith(
+      expect.objectContaining({ toneGuidance: expect.stringMatching(/demand is genuinely high/i) }),
+    );
+  });
+
+  it("adds the Kyrgyz register note to toneGuidance when the detected language is KY", async () => {
+    sessionMocks.getOrCreateActiveConversation.mockResolvedValue(conversationFixture("MIRA"));
+    providerUnderstandMock.mockResolvedValue({ ...PASSIVE_UNDERSTANDING });
+    handleInboundMessageMock.mockResolvedValue({
+      traceId: "cmd_trace_1",
+      routedTo: ["COMMAND"],
+      outcome: "trip_request_created",
+    } satisfies CommandResult);
+    providerReplyMock.mockResolvedValue({ text: "Кабыл алдым." });
+
+    await handleMiraInbound({ ...BASE_PARAMS, text: "Эртен Бишкектен Караколго кетем, 3 орун бар" });
+
+    expect(providerReplyMock).toHaveBeenCalledWith(
+      expect.objectContaining({ language: "KY", toneGuidance: expect.stringMatching(/write correctly/i) }),
+    );
+  });
+});
+
 describe("handleMiraInbound — baggage-policy + passenger-finance gate (Mira Pass 1 spec s.13-s.20, FINAL WIRING pass)", () => {
   it("SIGNIFICANT_EXCESS baggage weight records a financial intent and appends RT's fee note to the reply", async () => {
     sessionMocks.getOrCreateActiveConversation.mockResolvedValue(conversationFixture("MIRA"));

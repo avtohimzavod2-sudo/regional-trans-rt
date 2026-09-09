@@ -61,6 +61,7 @@ import { openCase } from "@/lib/adilet/case";
 import { clientFacingSummary } from "@/lib/adilet/bridge";
 import { recordInboundBusinessProspect } from "@/lib/delivery-contractor/orchestrator";
 import { driverDemandProposition } from "./propositions";
+import { buildToneGuidance } from "./tone-guidance";
 
 export const MIRA_AGENT_CONTRACT: AgentContract = {
   name: "MIRA",
@@ -710,6 +711,20 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
     ? composeRouteNotYetCoveredReply(detection.language)
     : composeFallbackReply(commandResult.outcome, detection.language);
 
+  // Mira Professional Communication Pass s.6 — toneGuidance was declared on
+  // MiraReplyInput and already consumed by the real Gemini provider
+  // (google-gemini.ts), but no caller ever set it. Built only from context
+  // already computed above this point (never a new detection pass) — it
+  // changes HOW Mira says something, never WHAT is true (situation still
+  // owns that).
+  const toneGuidance = buildToneGuidance({
+    language: detection.language,
+    outcome: commandResult.outcome,
+    requiresClarification: understanding.requiresClarification,
+    isRouteCoverageGap: isHonestCoverageGap,
+    hasDriverShortageSignal: driverProposition !== null,
+  });
+
   let replyText = fallbackReply;
   const replyStarted = Date.now();
   try {
@@ -718,6 +733,7 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
       situation,
       userText: params.text,
       conversationContext,
+      toneGuidance,
     });
     const safety = checkSafety(params.text, replyOut.text);
     // Mira Pass 1 spec s.6 — a free-generated reply must never assert a
