@@ -23,7 +23,7 @@ import {
   updateConversationState,
 } from "./session";
 import { checkSafety, detectInjectionAttempt, safetyRefusalText } from "./safety";
-import { detectUnverifiedClaims } from "./honesty";
+import { detectUnverifiedClaims, type VerifiableFact } from "./honesty";
 import {
   composeBaggageExcessNote,
   composeDeclineReasonAcknowledgement,
@@ -722,10 +722,17 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
     const safety = checkSafety(params.text, replyOut.text);
     // Mira Pass 1 spec s.6 — a free-generated reply must never assert a
     // price/seats/booking/payment/phone/vehicle/RT-Point fact orchestrator.ts
-    // did not itself verify. No knownFacts are passed here since this pass
-    // has no verified-fact channel into the reply yet; any such claim falls
-    // back to the deterministic, backend-derived template instead.
-    const honesty = detectUnverifiedClaims(replyOut.text);
+    // did not itself verify. No knownFacts are passed here for those, since
+    // this pass has no verified-fact channel into the reply yet; any such
+    // claim falls back to the deterministic, backend-derived template
+    // instead. cancellationCompletion is the one exception: for
+    // cancellation_case_opened, agents/support.ts has already synchronously
+    // verified Trip.status = CANCELLED before this outcome is ever produced
+    // (see reply-templates.ts's CANCELLATION_CASE_OPENED comment), so a
+    // free-generated reply is allowed to state that fact too.
+    const knownFacts: ReadonlySet<VerifiableFact> =
+      commandResult.outcome === "cancellation_case_opened" ? new Set(["cancellationCompletion"]) : new Set();
+    const honesty = detectUnverifiedClaims(replyOut.text, knownFacts);
     replyText = safety.safe && honesty.safe && replyOut.text.trim().length > 0 ? replyOut.text : fallbackReply;
     await logProviderCall({
       provider: provider.providerName,

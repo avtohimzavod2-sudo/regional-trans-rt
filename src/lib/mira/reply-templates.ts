@@ -20,10 +20,18 @@ const DRIVER_OFFER_CREATED: Templates = {
   EN: "Got your trip — I'm looking for a matching passenger now.",
 };
 
+// Mira Professional Communication Pass s.2 — this completion wording is
+// only honest because agents/support.ts's openSupportCase() sets
+// Trip.status to CANCELLED synchronously, in the same call that opens the
+// CANCELLATION-type SupportCase driving this outcome — by the time this
+// text is composed, the cancellation is already verified backend state,
+// not a pending request. If that atomic coupling ever changes (e.g. a
+// review/confirmation step is introduced before Trip.status flips), this
+// template must change with it to a "request received" wording instead.
 const CANCELLATION_CASE_OPENED: Templates = {
-  KY: "Кабыл алдым, сапарды жокко чыгардым. Дагы бир нерсе керек болсо — жазыңыз.",
-  RU: "Хорошо, отменила поездку. Если понадобится что-то ещё — напишите.",
-  EN: "Understood, I've cancelled the trip. Let me know if you need anything else.",
+  KY: "Жарайт, сапарыңызды жокко чыгардым. Дагы бир нерсе керек болсо — жазыңыз.",
+  RU: "Хорошо, поездка отменена. Если понадобится что-то ещё — напишите.",
+  EN: "Done — your trip is cancelled. Let me know if you need anything else.",
 };
 
 const UNRECOGNIZED_NEEDS_ROUTE: Templates = {
@@ -204,7 +212,9 @@ export function situationForOutcome(outcome: CommandResult["outcome"]): string {
     case "driver_offer_created":
       return "The driver's offer was accepted and Mira is now searching for a matching passenger.";
     case "cancellation_case_opened":
-      return "The user's trip was cancelled at their request.";
+      // Verified, not merely requested — see the CANCELLATION_CASE_OPENED
+      // comment above: Trip.status is already CANCELLED by this point.
+      return "The user's trip has been verified as cancelled at their request; this is a completed fact, not a pending one.";
     case "group_message_recorded":
       return "Mira saw the user's post in a group chat and is now inviting them to continue privately.";
     case "unrecognized":

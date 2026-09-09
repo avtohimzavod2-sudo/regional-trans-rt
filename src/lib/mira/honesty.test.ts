@@ -24,6 +24,7 @@ describe("detectUnverifiedClaims — proving Mira does not invent facts", () => 
     { fact: "phoneNumber", text: "Водителдин номери: +996700123456." },
     { fact: "vehicleData", text: "Сизди Toyota Camry, номери 01KG123ABC күтөт." },
     { fact: "rtPointAvailability", text: "RT Point свободен, можете подъезжать." },
+    { fact: "cancellationCompletion", text: "Хорошо, поездка отменена." },
   ];
 
   for (const { fact, text } of cases) {
@@ -59,19 +60,36 @@ describe("detectUnverifiedClaims — proving Mira does not invent facts", () => 
   });
 });
 
+// cancellation_case_opened is the one outcome whose deterministic wording is
+// *supposed* to assert cancellationCompletion (see reply-templates.ts's
+// CANCELLATION_CASE_OPENED comment: Trip.status is already CANCELLED,
+// verified, by the time this outcome exists) — it must trip that one claim
+// pattern and no others, mirroring the knownFacts orchestrator.ts passes.
+function knownFactsFor(outcome: (typeof ALL_OUTCOMES)[number]): ReadonlySet<VerifiableFact> {
+  return outcome === "cancellation_case_opened" ? new Set(["cancellationCompletion"]) : new Set();
+}
+
 describe("detectUnverifiedClaims — the real fallback templates never trip the guard", () => {
   for (const outcome of ALL_OUTCOMES) {
     for (const language of ["KY", "RU", "EN"] as const) {
       it(`composeFallbackReply(${outcome}, ${language}) is honesty-clean`, () => {
         const text = composeFallbackReply(outcome, language);
-        expect(detectUnverifiedClaims(text).safe).toBe(true);
+        expect(detectUnverifiedClaims(text, knownFactsFor(outcome)).safe).toBe(true);
       });
     }
   }
 
   for (const outcome of ALL_OUTCOMES) {
     it(`situationForOutcome(${outcome}) is honesty-clean`, () => {
-      expect(detectUnverifiedClaims(situationForOutcome(outcome)).safe).toBe(true);
+      expect(detectUnverifiedClaims(situationForOutcome(outcome), knownFactsFor(outcome)).safe).toBe(true);
     });
   }
+
+  it("cancellation_case_opened wording actually asserts cancellationCompletion (proves the exemption is doing real work, not vacuous)", () => {
+    for (const language of ["KY", "RU", "EN"] as const) {
+      const text = composeFallbackReply("cancellation_case_opened", language);
+      expect(detectUnverifiedClaims(text).safe).toBe(false);
+      expect(detectUnverifiedClaims(text).violations).toContain("cancellationCompletion");
+    }
+  });
 });

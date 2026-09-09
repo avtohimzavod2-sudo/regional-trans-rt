@@ -465,6 +465,58 @@ describe("handleMiraInbound — RT Command fallback (plain passenger text)", () 
   });
 });
 
+// Mira Professional Communication Pass s.2 (Cancellation Semantic Safety).
+// agents/support.ts's openSupportCase() sets Trip.status = CANCELLED
+// synchronously, in the same call that opens a CANCELLATION SupportCase —
+// so by the time CommandResult.outcome is "cancellation_case_opened", the
+// cancellation is already verified backend state. The honesty guard must
+// let a free-generated reply state that fact ONLY for this outcome, and
+// must still reject an unverified completion claim anywhere else.
+describe("handleMiraInbound — cancellation completion honesty (Mira Professional Communication Pass s.2)", () => {
+  it("falls back to the deterministic template if the provider claims cancellation completion for a non-cancellation outcome", async () => {
+    sessionMocks.getOrCreateActiveConversation.mockResolvedValue(conversationFixture("MIRA"));
+    handleInboundMessageMock.mockResolvedValue({
+      traceId: "cmd_trace_1",
+      routedTo: ["COMMAND"],
+      outcome: "trip_request_created",
+    } satisfies CommandResult);
+    providerReplyMock.mockResolvedValue({ text: "Хорошо, поездка отменена, всего доброго!" });
+
+    const result = await handleMiraInbound({ ...BASE_PARAMS, text: "Бишкектен Ошко 2 орун" });
+
+    expect(result.replyText).not.toContain("отменена");
+    expect(result.replyText.length).toBeGreaterThan(0);
+  });
+
+  it("accepts a natural free-generated reply that states cancellation completion for the cancellation_case_opened outcome, since it is already verified", async () => {
+    sessionMocks.getOrCreateActiveConversation.mockResolvedValue(conversationFixture("MIRA"));
+    handleInboundMessageMock.mockResolvedValue({
+      traceId: "cmd_trace_1",
+      routedTo: ["COMMAND", "SUPPORT"],
+      outcome: "cancellation_case_opened",
+    } satisfies CommandResult);
+    providerReplyMock.mockResolvedValue({ text: "Хорошо, ваша поездка отменена. Если понадобится помощь — я на связи." });
+
+    const result = await handleMiraInbound({ ...BASE_PARAMS, text: "Отмените мою поездку" });
+
+    expect(result.replyText).toBe("Хорошо, ваша поездка отменена. Если понадобится помощь — я на связи.");
+  });
+
+  it("still falls back to the deterministic template for cancellation_case_opened if the provider ALSO invents an unrelated unverified fact", async () => {
+    sessionMocks.getOrCreateActiveConversation.mockResolvedValue(conversationFixture("MIRA"));
+    handleInboundMessageMock.mockResolvedValue({
+      traceId: "cmd_trace_1",
+      routedTo: ["COMMAND", "SUPPORT"],
+      outcome: "cancellation_case_opened",
+    } satisfies CommandResult);
+    providerReplyMock.mockResolvedValue({ text: "Поездка отменена, возврат 500 сом уже отправлен на ваш счёт." });
+
+    const result = await handleMiraInbound({ ...BASE_PARAMS, text: "Отмените мою поездку" });
+
+    expect(result.replyText).not.toContain("500 сом");
+  });
+});
+
 describe("handleMiraInbound — driver-role Market Gap proposition (task #124, read-only)", () => {
   it("appends the live driverDemandProposition text only when a driver offer was just created", async () => {
     sessionMocks.getOrCreateActiveConversation.mockResolvedValue(conversationFixture("MIRA"));

@@ -51,3 +51,42 @@ describe("situationForOutcome", () => {
     }
   });
 });
+
+// Mira Professional Communication Pass s.2 (Cancellation Semantic Safety).
+// agents/support.ts's openSupportCase() sets Trip.status = CANCELLED
+// synchronously, in the same call that creates the CANCELLATION SupportCase
+// — by the time CommandResult.outcome is "cancellation_case_opened", the
+// backend has already verified the cancellation, not merely opened a
+// pending request. These tests pin that wording contract so it can't
+// silently regress into a false completion claim (if verification is ever
+// decoupled from case-opening) or an unnecessarily hedgy pending claim
+// (while it stays coupled).
+describe("cancellation_case_opened wording (spec s.2 — completion vs. pending)", () => {
+  const COMPLETION_WORD: Record<"KY" | "RU" | "EN", RegExp> = {
+    KY: /жокко\s+чыгар\w*/i,
+    RU: /отмен(ил[аи]?|ена|ён[аы]?)/i,
+    EN: /cancel+ed/i,
+  };
+
+  for (const lang of ["KY", "RU", "EN"] as const) {
+    it(`composeFallbackReply states the cancellation as a completed fact in ${lang}`, () => {
+      const text = composeFallbackReply("cancellation_case_opened", lang);
+      expect(text).toMatch(COMPLETION_WORD[lang]);
+    });
+  }
+
+  it("situationForOutcome describes cancellation as verified/completed, not pending", () => {
+    const situation = situationForOutcome("cancellation_case_opened");
+    expect(situation).toMatch(/cancel+ed|completed/i);
+    expect(situation).not.toMatch(/pending review|awaiting confirmation|will check/i);
+  });
+
+  it("does not use hedging/pending phrasing for an outcome that is already verified complete", () => {
+    for (const lang of ["KY", "RU", "EN"] as const) {
+      const text = composeFallbackReply("cancellation_case_opened", lang);
+      // Pending-request phrasing this outcome must NOT use, since the
+      // cancellation is already a completed, verified fact at this point.
+      expect(text).not.toMatch(/проверю статус|сообщу результат|checking the status|will confirm/i);
+    }
+  });
+});

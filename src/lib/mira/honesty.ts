@@ -17,7 +17,8 @@ export type VerifiableFact =
   | "parcelAcceptance"
   | "phoneNumber"
   | "vehicleData"
-  | "rtPointAvailability";
+  | "rtPointAvailability"
+  | "cancellationCompletion";
 
 export interface HonestyCheckResult {
   violations: VerifiableFact[];
@@ -35,7 +36,12 @@ const CLAIM_PATTERNS: ClaimPattern[] = [
   {
     fact: "price",
     patterns: [
-      /\d[\d\s]*\s*(сом|som|руб(?:л[ья])?|₽|kgs)\b/i,
+      // Trailing \b doesn't work here: JS regex word-boundaries only
+      // recognize ASCII [A-Za-z0-9_], so a Cyrillic currency word (сом,
+      // руб...) followed by whitespace/punctuation/end-of-string never
+      // produces a boundary. Use an explicit negative lookahead for any
+      // following letter (Cyrillic or Latin) instead.
+      /\d[\d\s]*\s*(сом|som|руб(?:л[ья])?|₽|kgs)(?![a-zA-Zа-яёА-ЯЁ])/i,
       /(баасы|цена|стоимость|price)\s*[:\-]?\s*\d/i,
     ],
   },
@@ -99,6 +105,20 @@ const CLAIM_PATTERNS: ClaimPattern[] = [
   {
     fact: "rtPointAvailability",
     patterns: [/rt\s*point[^.!?]{0,30}(бар|свобод\w*|available|доступ\w*)/i],
+  },
+  {
+    // Mira Professional Communication Pass s.2 — a completion claim
+    // ("отменила поездку" / "поездка отменена" / "cancelled the trip") is
+    // only ever true once cancellation is actually verified against backend
+    // state (see reply-templates.ts's CANCELLATION_CASE_OPENED comment for
+    // where that verification currently lives). A free-generated reply must
+    // never make this claim on its own initiative.
+    fact: "cancellationCompletion",
+    patterns: [
+      /отмен(ил[аи]?|ена|ён[аы]?)\s*(вашу\s+)?(поездк\w*|заявк\w*)?/i,
+      /жокко\s+чыгар\w*/i,
+      /\b(cancel+ed|cancel+ation\s+is\s+complete)\b.*\b(trip|ride|booking|request)\b|\b(trip|ride|booking|request)\b.*\bcancel+ed\b/i,
+    ],
   },
 ];
 
