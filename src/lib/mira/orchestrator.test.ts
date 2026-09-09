@@ -1008,4 +1008,124 @@ describe("handleMiraInbound — conversation continuity (Mira Pass 1 spec s.7)",
       }),
     );
   });
+
+  // Mira Pass 3 (Multi-turn Continuity Certification) scenario E — a later
+  // luggage mention must accumulate onto the request like any other field,
+  // never displacing what earlier turns already established.
+  it("adds a later luggage mention without disturbing previously collected fields", async () => {
+    sessionMocks.getOrCreateActiveConversation.mockResolvedValue(
+      conversationFixture("MIRA", {
+        collectedFields: { from: "BISHKEK", to: "KARAKOL", date: "TOMORROW", passengerCount: 2 },
+      }),
+    );
+    providerUnderstandMock.mockResolvedValue({
+      ...PASSIVE_UNDERSTANDING,
+      entities: { luggage: "1 чемодан" },
+    });
+
+    await handleMiraInbound({ ...BASE_PARAMS, text: "дагы 1 чемодан алып барам" });
+
+    expect(sessionMocks.updateConversationState).toHaveBeenCalledWith(
+      "conv_1",
+      expect.objectContaining({
+        collectedFields: { from: "BISHKEK", to: "KARAKOL", date: "TOMORROW", passengerCount: 2, luggage: "1 чемодан" },
+      }),
+    );
+  });
+
+  // Mira Pass 3 scenario G/C — the existing "жок, бүгүн" case above proves
+  // the principle in Kyrgyz; this certifies the same date-only-change
+  // behavior against the explicit Russian "не X, а Y" correction wording
+  // named in the Founder's Pass 3 scope.
+  it('lets explicit "не X, а Y" correction wording change only the date ("не завтра, а сегодня")', async () => {
+    sessionMocks.getOrCreateActiveConversation.mockResolvedValue(
+      conversationFixture("MIRA", {
+        collectedFields: { from: "BISHKEK", to: "KARAKOL", date: "TOMORROW", passengerCount: 2 },
+      }),
+    );
+    providerUnderstandMock.mockResolvedValue({
+      ...PASSIVE_UNDERSTANDING,
+      entities: { date: "TODAY" },
+    });
+
+    await handleMiraInbound({ ...BASE_PARAMS, text: "не завтра, а сегодня" });
+
+    expect(sessionMocks.updateConversationState).toHaveBeenCalledWith(
+      "conv_1",
+      expect.objectContaining({
+        collectedFields: { from: "BISHKEK", to: "KARAKOL", date: "TODAY", passengerCount: 2 },
+      }),
+    );
+  });
+
+  // Mira Pass 3 scenario G/D — same explicit-correction-wording certification
+  // as above, applied to the destination field.
+  it('lets explicit "не X, а Y" correction wording change only the destination ("не Ош, а Джалал-Абад")', async () => {
+    sessionMocks.getOrCreateActiveConversation.mockResolvedValue(
+      conversationFixture("MIRA", {
+        collectedFields: { from: "BISHKEK", to: "OSH", date: "TOMORROW", passengerCount: 2 },
+      }),
+    );
+    providerUnderstandMock.mockResolvedValue({
+      ...PASSIVE_UNDERSTANDING,
+      entities: { to: "JALALABAD" },
+    });
+
+    await handleMiraInbound({ ...BASE_PARAMS, text: "не Ош, а Джалал-Абад" });
+
+    expect(sessionMocks.updateConversationState).toHaveBeenCalledWith(
+      "conv_1",
+      expect.objectContaining({
+        collectedFields: { from: "BISHKEK", to: "JALALABAD", date: "TOMORROW", passengerCount: 2 },
+      }),
+    );
+  });
+
+  // Mira Pass 3 scenario H — a later turn repeating a fact Mira already has
+  // must never duplicate, drift, or trigger a re-ask; the merge must be a
+  // true no-op. (This is also what prevents scenario I — the frustration
+  // caused by Mira asking twice for the same known information — since there
+  // is nothing here that could prompt a repeat question.)
+  it("stays unchanged when a later turn repeats an already-known fact", async () => {
+    const previouslyCollected = { from: "BISHKEK", to: "KARAKOL", date: "TOMORROW", passengerCount: 2 };
+    sessionMocks.getOrCreateActiveConversation.mockResolvedValue(
+      conversationFixture("MIRA", { collectedFields: previouslyCollected }),
+    );
+    providerUnderstandMock.mockResolvedValue({
+      ...PASSIVE_UNDERSTANDING,
+      entities: { from: "BISHKEK" },
+    });
+
+    await handleMiraInbound({ ...BASE_PARAMS, text: "мен Бишкектен деп айттым эле" });
+
+    expect(sessionMocks.updateConversationState).toHaveBeenCalledWith(
+      "conv_1",
+      expect.objectContaining({ collectedFields: previouslyCollected }),
+    );
+  });
+
+  // Mira Pass 3 scenario J — an ambiguous correction (nothing the provider
+  // could confidently extract, requiresClarification=true) must lead to one
+  // targeted clarification, never a guess. At the collectedFields layer that
+  // means: previously collected fields are left exactly as they were, never
+  // partially overwritten or erased on a turn Mira herself flagged as unclear.
+  it("never guesses or erases previously collected fields on an ambiguous turn that requires clarification", async () => {
+    const previouslyCollected = { from: "BISHKEK", to: "KARAKOL" };
+    sessionMocks.getOrCreateActiveConversation.mockResolvedValue(
+      conversationFixture("MIRA", { collectedFields: previouslyCollected }),
+    );
+    providerUnderstandMock.mockResolvedValue({
+      ...PASSIVE_UNDERSTANDING,
+      entities: {},
+      requiresClarification: true,
+      clarificationQuestion: "уточните, пожалуйста",
+    });
+
+    await handleMiraInbound({ ...BASE_PARAMS, text: "не то" });
+
+    expect(sessionMocks.updateConversationState).toHaveBeenCalledWith(
+      "conv_1",
+      expect.objectContaining({ collectedFields: previouslyCollected }),
+    );
+  });
 });

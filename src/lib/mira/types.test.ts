@@ -39,4 +39,13 @@ describe("mergeMiraNormalizedFields", () => {
     const previous = { from: "BISHKEK", to: "KARAKOL" };
     expect(mergeMiraNormalizedFields(previous, {})).toEqual(previous);
   });
+
+  // Mira Pass 3 (Multi-turn Continuity Certification) scenario H — a later
+  // turn repeating a fact Mira already has must not duplicate, drift, or
+  // otherwise disturb the previously collected value.
+  it("is idempotent when a later turn repeats an already-known value", () => {
+    const previous = { from: "BISHKEK", to: "KARAKOL", date: "TOMORROW", passengerCount: 2 };
+    const merged = mergeMiraNormalizedFields(previous, { from: "BISHKEK" });
+    expect(merged).toEqual(previous);
+  });
 });
