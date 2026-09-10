@@ -1,4 +1,4 @@
-import type { PaymentMode } from "@prisma/client";
+import type { PaymentMode, Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { logAction } from "@/lib/audit";
 import { findCandidateOffers, findCandidateRequests } from "./engine";
@@ -393,17 +393,23 @@ async function revealContacts(matchId: string, tripId: string) {
 // per-trip by passing an explicit `payment` param once a THROUGH_RT flow exists.
 const DEFAULT_PAYMENT_MODE: PaymentMode = "DRIVER_DIRECT_RT_BALANCE";
 
-export async function completeTrip(tripId: string, payment?: { mode?: PaymentMode; totalFareSom?: number }) {
-  const trip = await db.trip.findUniqueOrThrow({
-    where: { id: tripId },
-    include: { driverOffer: { include: { origin: true, destination: true } } },
-  });
+type TripWithOfferStops = Prisma.TripGetPayload<{
+  include: { driverOffer: { include: { origin: true; destination: true } } };
+}>;
 
-  await db.trip.update({ where: { id: tripId }, data: { status: "COMPLETED", completedAt: new Date() } });
-
+/** Shared post-completion side effects (commission charge, return-leg offer
+ * creation, re-matching) for every path that transitions a Trip to
+ * COMPLETED. Callers must have already made that transition themselves via
+ * an atomic, condition-guarded write — this helper never re-checks or
+ * re-writes Trip.status, so it is safe to call exactly once per genuine
+ * completion regardless of which caller triggered it. */
+async function runTripCompletionSideEffects(
+  trip: TripWithOfferStops,
+  payment?: { mode?: PaymentMode; totalFareSom?: number },
+) {
   const ctx = rootContext();
   try {
-    await chargeCommissionForTrip(ctx, tripId, {
+    await chargeCommissionForTrip(ctx, trip.id, {
       mode: payment?.mode ?? DEFAULT_PAYMENT_MODE,
       totalFareSom: payment?.totalFareSom,
     });
@@ -426,10 +432,108 @@ export async function completeTrip(tripId: string, payment?: { mode?: PaymentMod
     actorType: "SYSTEM",
     action: "trip.completed",
     entityType: "Trip",
-    entityId: tripId,
+    entityId: trip.id,
     details: { returnLegOfferId: returnOffer.id },
   });
 
   await proposeMatchesForOffer(returnOffer.id);
   return returnOffer;
+}
+
+export async function completeTrip(tripId: string, payment?: { mode?: PaymentMode; totalFareSom?: number }) {
+  const trip = await db.trip.findUniqueOrThrow({
+    where: { id: tripId },
+    include: { driverOffer: { include: { origin: true, destination: true } } },
+  });
+
+  await db.trip.update({ where: { id: tripId }, data: { status: "COMPLETED", completedAt: new Date() } });
+
+  return runTripCompletionSideEffects(trip, payment);
+}
+
+// --- Driver Live Signals / Telemetry (new, additive) ---------------------
+// The functions below are the exclusive Trip/DriverOffer mutation surface
+// for real driver-reported operational signals (RT OFFICE's
+// telemetry.ts calls into these — never db.trip/db.driverOffer directly,
+// matching this file's existing exclusive-write-surface role). Every
+// transition here is an atomic, condition-guarded update (same CAS idiom as
+// handlePassengerResponse's seat decrement above) so a duplicate or
+// out-of-order driver report can never double-apply a state change.
+
+/** Driver-reported "выехал" (departed): SCHEDULED -> IN_PROGRESS. A repeat
+ * report (already IN_PROGRESS) or a report against a trip that was never
+ * SCHEDULED (already COMPLETED/CANCELLED/NO_SHOW) is a safe no-op, never an
+ * error and never a fabricated transition. */
+export async function markTripDeparted(tripId: string) {
+  const result = await db.trip.updateMany({
+    where: { id: tripId, status: "SCHEDULED" },
+    data: { status: "IN_PROGRESS" },
+  });
+  if (result.count > 0) {
+    await logAction({ actorType: "AGENT", actorId: "RT_OFFICE", action: "trip.departed_reported_by_driver", entityType: "Trip", entityId: tripId });
+  }
+  return { tripId, transitioned: result.count > 0 };
+}
+
+/** Driver-reported absolute free-seat count for their currently open offer.
+ * A driver report is an authoritative refresh of the current number, not a
+ * decrement against a scarce resource, so last-write-wins is the correct
+ * behavior here (unlike handlePassengerResponse's seat decrement, which
+ * guards against overselling a fixed pool). Always bounded to
+ * [0, seatsTotal] — never trusts a driver-supplied number past the vehicle's
+ * real capacity. Only applies to an offer that is still open in some form
+ * (OPEN/PARTIALLY_FILLED/FULL); a CLOSED/CANCELLED offer is left untouched. */
+export async function setDriverReportedSeatsAvailable(offerId: string, reportedSeats: number) {
+  const offer = await db.driverOffer.findUniqueOrThrow({ where: { id: offerId } });
+  const bounded = Math.max(0, Math.min(Math.trunc(reportedSeats), offer.seatsTotal));
+  const status = bounded === 0 ? "FULL" : offer.status === "FULL" ? "PARTIALLY_FILLED" : offer.status;
+
+  const result = await db.driverOffer.updateMany({
+    where: { id: offerId, status: { in: ["OPEN", "PARTIALLY_FILLED", "FULL"] } },
+    data: { seatsAvailable: bounded, status },
+  });
+  if (result.count > 0) {
+    await logAction({
+      actorType: "AGENT",
+      actorId: "RT_OFFICE",
+      action: "offer.seats_reported_by_driver",
+      entityType: "DriverOffer",
+      entityId: offerId,
+      details: { reportedSeats, boundedSeatsAvailable: bounded },
+    });
+  }
+  return { offerId, seatsAvailable: bounded, updated: result.count > 0 };
+}
+
+/** Driver-reported "рейс завершен" (trip completed), as an alternative
+ * entrypoint to the dispatcher-driven completeTrip() above. Unlike
+ * completeTrip (which unconditionally transitions and unconditionally
+ * creates a return-leg offer — safe there because it has exactly one
+ * dispatcher-triggered caller), this performs its own atomic
+ * condition-guarded transition first: only a trip currently SCHEDULED or
+ * IN_PROGRESS can be claimed, and the side effects (commission, return leg,
+ * re-matching) only ever run for whichever single caller wins that claim.
+ * A duplicate or out-of-order driver report against an already-COMPLETED
+ * trip is a safe no-op, never a second return-leg offer. */
+export async function markTripCompletedByDriverReport(
+  tripId: string,
+  payment?: { mode?: PaymentMode; totalFareSom?: number },
+) {
+  const now = new Date();
+  const claim = await db.trip.updateMany({
+    where: { id: tripId, status: { in: ["SCHEDULED", "IN_PROGRESS"] } },
+    data: { status: "COMPLETED", completedAt: now },
+  });
+
+  if (claim.count === 0) {
+    const trip = await db.trip.findUniqueOrThrow({ where: { id: tripId } });
+    return { returnOffer: null, alreadyCompleted: trip.status === "COMPLETED" };
+  }
+
+  const trip = await db.trip.findUniqueOrThrow({
+    where: { id: tripId },
+    include: { driverOffer: { include: { origin: true, destination: true } } },
+  });
+  const returnOffer = await runTripCompletionSideEffects(trip, payment);
+  return { returnOffer, alreadyCompleted: false };
 }

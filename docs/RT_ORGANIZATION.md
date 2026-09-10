@@ -289,6 +289,76 @@ involved. Both dispatcher screens compute this feed from the `fleet` they
 already fetched, in a "Требует внимания" block, without altering their
 existing sections.
 
+### 5.3 Driver Live Signals / Telemetry — driver Telegram text into verified facts
+
+`src/lib/rt-office/telemetry.ts`'s `ingestDriverTelemetryText()` is the
+production flow from a driver's free-text Telegram report to a verified
+operational fact: **driver Telegram text -> `classifyDriverTelemetryText`
+(`src/lib/rt-office/telemetry-classify.ts`, deterministic dictionary
+matching, no LLM) -> CRM Auto's append-only fact log
+(`recordOperationalEvent`/`openBreakdownIncident`/`resolveBreakdownIncident`)
+-> when the signal changes real Trip/DriverOffer state, the existing
+exclusive write surface in `matching/orchestrate.ts`
+(`markTripDeparted`/`setDriverReportedSeatsAvailable`/
+`markTripCompletedByDriverReport`) -> when a real route fact is needed
+(ETA request), Jolchu's `resolveRouteIntelligence` -> the existing Live
+Fleet Picture / Driver Operations Detail / Fleet Attention Feed**, all
+unmodified consumers of the same CRM Auto facts described in s.5/5.1/5.2.
+It is not a second fleet/snapshot engine, not a second matching engine, and
+never computes its own ETA or geography.
+
+11 real signals are recognized: on duty, waiting for passengers, departed,
+arrived, trip completed, seat-count change, driver-reported delay,
+breakdown opened, breakdown resolved, location update, and an ETA request.
+Unrecognized or ambiguous text classifies as `signalType: null` and is never
+guessed into one of these — the caller falls through to Mira's normal
+understanding pipeline. A message from a Telegram id with no matching
+verified `Driver` row is likewise never treated as a signal — telemetry
+never auto-registers a driver.
+
+Idempotency is mandatory and checked first, via the new
+`findEventByIdempotencyKey` (`src/lib/crm-auto/bridge.ts`) — a read-only
+pre-check on `DriveCrmEvent.idempotencyKey`, called before any CRM Auto
+write. This exists in addition to `recordOperationalEvent`'s own
+DB-unique-constraint dedup because `openBreakdownIncident`/
+`resolveBreakdownIncident` each run their business-rule check
+(`canOpenBreakdown`/`canResolveBreakdown`) *before* ever reaching that
+dedup — without the pre-check, a genuine duplicate delivery of the same
+"breakdown opened" report would be misread as a conflicting second
+incident rather than recognized as a harmless replay. The idempotency key
+is derived from the real channel message id
+(`driver-telemetry:<driverId>:<signalType>:<rawMessageId>`), so the
+Telegram webhook (`src/app/api/webhooks/telegram/route.ts`) now passes
+`ctx.message.message_id` through to Mira as `rawMessageId`, matching the
+WhatsApp webhook's existing `rawMessageId` wiring.
+
+Signals never fabricate an operational conclusion from their absence or
+from ambiguity: a driver-reported delay is recorded as history only — it
+never opens a breakdown, flips a Trip status, or invents a new ETA; a
+departure/completion report with no resolvable Trip context (the same
+`selectCurrentContext` rule from s.5.1/5.2, reused here rather than
+duplicated) is recorded as history and replies honestly that no active
+trip was found, instead of guessing one; an ETA request only ever records a
+new `OPERATIONAL_ETA` fact when Jolchu's `resolveRouteIntelligence`
+actually returns `RESOLVED` — a failed/ambiguous result leaves any
+previously recorded ETA exactly as-is (still subject to the existing
+`getEtaStalenessMinutes()` freshness check) rather than overwriting it with
+a guess.
+
+Mira owns the one outward reply, as always: `src/lib/mira/orchestrator.ts`
+gates on this module immediately before its own quick-classify/NLU pass
+(Telegram-only, since `Driver` has no WhatsApp identity in this schema) and
+sends whatever plain reply string `ingestDriverTelemetryText` returns via
+the existing `sendReply()` — RT OFFICE still never sends anything itself
+(`src/lib/rt-office/boundary.test.ts`). Internal driver detail recorded
+here (free text, technical signal names, reported delay minutes, breakdown
+details) lives only in `DriveCrmEvent.details` and the driver-facing reply;
+the passenger-facing read path (`SupplyFact`, s.4/`facts.ts`) is built from
+`latestVerifiedEtaForOffer(s)`, which only ever surfaces
+`etaMinutes`/`freshness`/`delayed`/`arrived` and never the underlying
+`details` blob — so a driver's free-text report can never leak verbatim to
+a passenger.
+
 ## 6. Market Acquisition Contractors — Driver / Passenger / Delivery
 
 Three LOW-criticality agents, all reporting to Artur, all read Market Gap

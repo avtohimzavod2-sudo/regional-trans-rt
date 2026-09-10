@@ -34,6 +34,14 @@ describe("deriveOperationalState", () => {
     expect(deriveOperationalState(baseInput({ activeTripStatus: "IN_PROGRESS", delayedSignal: true }))).toBe("DELAYED");
   });
 
+  it("returns ARRIVED for an in-progress trip once an explicit arrival signal is recorded, even before administrative completion", () => {
+    expect(deriveOperationalState(baseInput({ activeTripStatus: "IN_PROGRESS", arrivedSignal: true }))).toBe("ARRIVED");
+  });
+
+  it("prioritizes an explicit arrival signal over a delay signal on an in-progress trip", () => {
+    expect(deriveOperationalState(baseInput({ activeTripStatus: "IN_PROGRESS", arrivedSignal: true, delayedSignal: true }))).toBe("ARRIVED");
+  });
+
   it("returns WAITING_DEPARTURE for a scheduled trip", () => {
     expect(deriveOperationalState(baseInput({ activeTripStatus: "SCHEDULED" }))).toBe("WAITING_DEPARTURE");
   });

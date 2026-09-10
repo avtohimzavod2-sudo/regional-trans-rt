@@ -118,4 +118,32 @@ describe("latestVerifiedEtaForOffers", () => {
       expect.objectContaining({ where: expect.objectContaining({ offerId: { in: ["offer-1"] } }) }),
     );
   });
+
+  it("never leaks the raw DriveCrmEvent.details blob to callers — spec s.7: internal driver telemetry (free text, coordinates, technical signal names) must never reach a passenger-facing fact (this is exactly what RT OFFICE's facts.ts SupplyFact is built from)", async () => {
+    const eventWithSensitiveDetails = {
+      offerId: "offer-1",
+      etaMinutes: 12,
+      source: "JOLCHU",
+      createdAt: new Date("2026-09-10T08:00:00Z"),
+      details: {
+        signalType: "LOCATION_UPDATE",
+        freeText: "я возле заправки на трассе, координаты 42.87,74.59",
+        rawText: "я возле заправки на трассе, координаты 42.87,74.59",
+        delayed: true,
+      },
+    };
+    dbMocks.driveCrmEvent.findMany.mockResolvedValue([eventWithSensitiveDetails]);
+
+    const result = await latestVerifiedEtaForOffers(["offer-1"]);
+    const fact = result.get("offer-1");
+
+    expect(fact).toEqual({
+      etaMinutes: 12,
+      freshness: { source: "JOLCHU", asOf: eventWithSensitiveDetails.createdAt.toISOString() },
+      delayed: true,
+      arrived: false,
+    });
+    expect(Object.keys(fact ?? {})).not.toContain("details");
+    expect(JSON.stringify(fact)).not.toMatch(/заправки|координаты|freeText|rawText/);
+  });
 });

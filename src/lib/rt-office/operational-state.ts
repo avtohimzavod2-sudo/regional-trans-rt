@@ -27,7 +27,10 @@ export function deriveOperationalState(input: OperationalStateInput): Operationa
 
   if (input.activeTripStatus === "CANCELLED" || input.activeTripStatus === "NO_SHOW") return "CANCELLED";
   if (input.activeTripStatus === "COMPLETED") return input.arrivedSignal ? "ARRIVED" : "COMPLETED";
-  if (input.activeTripStatus === "IN_PROGRESS") return input.delayedSignal ? "DELAYED" : "EN_ROUTE";
+  if (input.activeTripStatus === "IN_PROGRESS") {
+    if (input.arrivedSignal) return "ARRIVED";
+    return input.delayedSignal ? "DELAYED" : "EN_ROUTE";
+  }
   if (input.activeTripStatus === "SCHEDULED") return "WAITING_DEPARTURE";
 
   if (input.driverStatus !== "ACTIVE") return "OFFLINE";

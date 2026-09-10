@@ -52,9 +52,12 @@ const { dbMocks, logActionMock, sendTelegramMessageMock, sendWhatsAppTextMock, s
         updateMany: vi.fn(),
         findUniqueOrThrow: vi.fn(),
         update: vi.fn().mockResolvedValue({}),
+        create: vi.fn(),
       },
       trip: {
         create: vi.fn(),
+        updateMany: vi.fn(),
+        findUniqueOrThrow: vi.fn(),
       },
     },
     logActionMock: vi.fn().mockResolvedValue(undefined),
@@ -84,7 +87,13 @@ vi.mock("@/lib/agents/pay", () => ({
 }));
 
 import { messages } from "@/lib/i18n/messages";
-import { handleDriverResponse, handlePassengerResponse } from "./orchestrate";
+import {
+  handleDriverResponse,
+  handlePassengerResponse,
+  markTripCompletedByDriverReport,
+  markTripDeparted,
+  setDriverReportedSeatsAvailable,
+} from "./orchestrate";
 
 describe("handlePassengerResponse", () => {
   beforeEach(() => {
@@ -255,5 +264,138 @@ describe("handleDriverResponse", () => {
     expect(result.status).toBe("DECLINED_BY_DRIVER");
     expect(dbMocks.match.update).not.toHaveBeenCalled();
     expect(sendWhatsAppConfirmButtonsMock).not.toHaveBeenCalled();
+  });
+});
+
+// Driver Live Signals / Telemetry — coverage for the three new exclusive
+// Trip/DriverOffer mutation functions RT OFFICE's telemetry module calls
+// into. Each guards its transition with an atomic, condition-scoped
+// updateMany, so these tests exercise both the normal (first-delivery) path
+// and the duplicate/out-of-order-delivery no-op path directly, without
+// needing to go through the not-yet-written RT OFFICE orchestration layer.
+describe("markTripDeparted", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("transitions a SCHEDULED trip to IN_PROGRESS and logs the report", async () => {
+    dbMocks.trip.updateMany.mockResolvedValue({ count: 1 });
+
+    const result = await markTripDeparted("trip-1");
+
+    expect(dbMocks.trip.updateMany).toHaveBeenCalledWith({
+      where: { id: "trip-1", status: "SCHEDULED" },
+      data: { status: "IN_PROGRESS" },
+    });
+    expect(logActionMock).toHaveBeenCalledWith(expect.objectContaining({ action: "trip.departed_reported_by_driver", entityId: "trip-1" }));
+    expect(result).toEqual({ tripId: "trip-1", transitioned: true });
+  });
+
+  it("is a safe no-op for a duplicate or out-of-order departure report against a trip that is no longer SCHEDULED", async () => {
+    dbMocks.trip.updateMany.mockResolvedValue({ count: 0 });
+
+    const result = await markTripDeparted("trip-1");
+
+    expect(logActionMock).not.toHaveBeenCalled();
+    expect(result).toEqual({ tripId: "trip-1", transitioned: false });
+  });
+});
+
+describe("setDriverReportedSeatsAvailable", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("bounds a driver-reported seat count to the vehicle's real capacity and updates status", async () => {
+    dbMocks.driverOffer.findUniqueOrThrow.mockResolvedValue({ id: "offer-1", seatsTotal: 4, status: "FULL" });
+    dbMocks.driverOffer.updateMany.mockResolvedValue({ count: 1 });
+
+    const result = await setDriverReportedSeatsAvailable("offer-1", 99);
+
+    expect(dbMocks.driverOffer.updateMany).toHaveBeenCalledWith({
+      where: { id: "offer-1", status: { in: ["OPEN", "PARTIALLY_FILLED", "FULL"] } },
+      data: { seatsAvailable: 4, status: "PARTIALLY_FILLED" },
+    });
+    expect(result).toEqual({ offerId: "offer-1", seatsAvailable: 4, updated: true });
+  });
+
+  it("never trusts a negative driver-reported count — floors at zero and marks the offer FULL", async () => {
+    dbMocks.driverOffer.findUniqueOrThrow.mockResolvedValue({ id: "offer-1", seatsTotal: 4, status: "OPEN" });
+    dbMocks.driverOffer.updateMany.mockResolvedValue({ count: 1 });
+
+    const result = await setDriverReportedSeatsAvailable("offer-1", -3);
+
+    expect(dbMocks.driverOffer.updateMany).toHaveBeenCalledWith({
+      where: { id: "offer-1", status: { in: ["OPEN", "PARTIALLY_FILLED", "FULL"] } },
+      data: { seatsAvailable: 0, status: "FULL" },
+    });
+    expect(result.seatsAvailable).toBe(0);
+  });
+
+  it("is a safe no-op once the offer is no longer open (CLOSED/CANCELLED)", async () => {
+    dbMocks.driverOffer.findUniqueOrThrow.mockResolvedValue({ id: "offer-1", seatsTotal: 4, status: "OPEN" });
+    dbMocks.driverOffer.updateMany.mockResolvedValue({ count: 0 });
+
+    const result = await setDriverReportedSeatsAvailable("offer-1", 2);
+
+    expect(logActionMock).not.toHaveBeenCalled();
+    expect(result.updated).toBe(false);
+  });
+});
+
+describe("markTripCompletedByDriverReport", () => {
+  const tripWithOffer = {
+    id: "trip-1",
+    driverId: "driver-1",
+    driverOffer: {
+      destinationStopId: "stop-dest",
+      originStopId: "stop-origin",
+      travelDate: new Date("2026-09-20T00:00:00+06:00"),
+      seatsTotal: 4,
+    },
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    dbMocks.trip.findUniqueOrThrow.mockResolvedValue(tripWithOffer);
+    dbMocks.driverOffer.create.mockResolvedValue({ id: "return-offer-1" });
+    dbMocks.match.count.mockResolvedValue(0);
+    // The return-leg offer's driver is deliberately not ACTIVE, so
+    // proposeMatchesForOffer bails out immediately after the status checks —
+    // this test is about markTripCompletedByDriverReport's own idempotency,
+    // not re-matching, and must not need to also stub CRM Auto's breakdown
+    // lookup (bridge.ts) just to reach that bail-out.
+    dbMocks.driverOffer.findUniqueOrThrow.mockResolvedValue({
+      id: "return-offer-1",
+      status: "OPEN",
+      driverId: "driver-1",
+      driver: { status: "SUSPENDED" },
+    });
+  });
+
+  it("claims a SCHEDULED/IN_PROGRESS trip exactly once, charges commission, and opens the return-leg offer", async () => {
+    dbMocks.trip.updateMany.mockResolvedValue({ count: 1 });
+
+    const result = await markTripCompletedByDriverReport("trip-1");
+
+    expect(dbMocks.trip.updateMany).toHaveBeenCalledWith({
+      where: { id: "trip-1", status: { in: ["SCHEDULED", "IN_PROGRESS"] } },
+      data: expect.objectContaining({ status: "COMPLETED" }),
+    });
+    expect(dbMocks.driverOffer.create).toHaveBeenCalledTimes(1);
+    expect(logActionMock).toHaveBeenCalledWith(expect.objectContaining({ action: "trip.completed", entityId: "trip-1" }));
+    expect(result.alreadyCompleted).toBe(false);
+    expect(result.returnOffer).toEqual({ id: "return-offer-1" });
+  });
+
+  it("is a safe no-op for a duplicate driver completion report — never creates a second return-leg offer", async () => {
+    dbMocks.trip.updateMany.mockResolvedValue({ count: 0 });
+    dbMocks.trip.findUniqueOrThrow.mockResolvedValue({ ...tripWithOffer, status: "COMPLETED" });
+
+    const result = await markTripCompletedByDriverReport("trip-1");
+
+    expect(dbMocks.driverOffer.create).not.toHaveBeenCalled();
+    expect(logActionMock).not.toHaveBeenCalledWith(expect.objectContaining({ action: "trip.completed" }));
+    expect(result).toEqual({ returnOffer: null, alreadyCompleted: true });
   });
 });

@@ -62,6 +62,7 @@ import { clientFacingSummary } from "@/lib/adilet/bridge";
 import { recordInboundBusinessProspect } from "@/lib/delivery-contractor/orchestrator";
 import { driverDemandProposition } from "./propositions";
 import { buildToneGuidance } from "./tone-guidance";
+import { ingestDriverTelemetryText } from "@/lib/rt-office/telemetry";
 
 export const MIRA_AGENT_CONTRACT: AgentContract = {
   name: "MIRA",
@@ -333,6 +334,53 @@ export async function handleMiraInbound(params: MiraInboundParams): Promise<Mira
     // UNCLEAR: fall through to the normal understanding flow below — the
     // shipment simply stays at AWAITING_CONFIRMATION until a clear reply
     // arrives, RT Command/Sapar's own clarification handling takes it from here.
+  }
+
+  // Driver Live Signals / Telemetry gate: a driver's free-text operational
+  // report (on duty, departed, arrived, seat count, breakdown, ETA request,
+  // etc.) is answered directly by RT OFFICE's deterministic telemetry
+  // module, never by the general NLU/intent pipeline below (spec rule #4:
+  // never an LLM guess for an operational fact). Telegram-only — Driver has
+  // no WhatsApp identity in this schema, so ingestDriverTelemetryText would
+  // find no matching driver for a WhatsApp sender and this is a pure no-op
+  // there; gating on channel here just avoids that wasted lookup.
+  if (params.channel === "TELEGRAM_BOT") {
+    const telemetry = await ingestDriverTelemetryText({
+      telegramUserId: params.senderId,
+      rawText: params.text,
+      rawMessageId: params.rawMessageId,
+    });
+    if (telemetry) {
+      await appendUserMessage(conversation.id, {
+        rawText: params.text,
+        detectedLanguage: detection.language,
+        languageConfidence: detection.confidence,
+        traceId: ctx.traceId,
+      });
+      const sent = await sendReply(params.channel, params.senderId, telemetry.replyText);
+      await appendMiraMessage(conversation.id, telemetry.replyText, ctx.traceId);
+      await updateConversationState(conversation.id, {
+        detectedLanguage: detection.language,
+        status: "ACTIVE",
+        lastAgentDecision: `driver_telemetry_${telemetry.signalType.toLowerCase()}`,
+        lastTraceId: ctx.traceId,
+        activeSpecialist: "MIRA",
+      });
+      await logAgentAction({
+        ctx,
+        agent: "MIRA",
+        action: "mira.driver_telemetry_handled",
+        entityType: "MiraConversation",
+        entityId: conversation.id,
+        details: {
+          channel: params.channel,
+          senderId: params.senderId,
+          signalType: telemetry.signalType,
+          deduplicated: telemetry.deduplicated,
+        },
+      });
+      return { conversationId: conversation.id, traceId: ctx.traceId, replyText: telemetry.replyText, sent };
+    }
   }
 
   const quick = quickClassifyMessage(params.text);

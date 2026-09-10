@@ -27,6 +27,7 @@ function bot() {
           senderId: String(ctx.from.id),
           senderUsername: ctx.from.username ?? null,
           text: ctx.message.text,
+          rawMessageId: String(ctx.message.message_id),
         });
         return;
       }

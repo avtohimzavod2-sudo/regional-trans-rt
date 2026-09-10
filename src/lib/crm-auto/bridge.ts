@@ -144,6 +144,21 @@ export async function latestVerifiedEtaForOffers(offerIds: string[]): Promise<Ma
   return result;
 }
 
+/** Read-only duplicate-delivery check for callers that must decide whether
+ * to even attempt a write (e.g. RT OFFICE's driver telemetry ingestion):
+ * a hit means this exact idempotencyKey was already recorded, so the caller
+ * can skip re-deriving and re-applying any state transition entirely rather
+ * than calling recordOperationalEvent/openBreakdownIncident/
+ * resolveBreakdownIncident a second time. This matters beyond
+ * recordOperationalEvent's own P2002 dedup: openBreakdownIncident and
+ * resolveBreakdownIncident each run a business-rule check (canOpenBreakdown/
+ * canResolveBreakdown) BEFORE ever reaching that dedup, so an unguarded
+ * duplicate "breakdown opened" report would be rejected as "already open"
+ * instead of being recognized as the harmless replay it is. */
+export async function findEventByIdempotencyKey(idempotencyKey: string) {
+  return db.driveCrmEvent.findUnique({ where: { idempotencyKey } });
+}
+
 /** Artur's read-only Drive CRM visibility (spec s.9) — full recent history,
  * never mutation access. */
 export async function operationalHistoryForArtur(driverId: string, limit = 20) {
