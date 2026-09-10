@@ -415,3 +415,227 @@ Dispatcher visibility: `/dispatcher/market-gap` (the live network-wide gap),
 `/dispatcher/delivery-contractor` are all read-only views — the same
 pattern as `/dispatcher/drive-crm` and `/dispatcher/rt-office` — backed by
 each contractor's own `bridge.ts`.
+
+## 7. Booking Lifecycle — the passenger-driver core loop (MATCH)
+
+This is the one production path that actually turns a passenger's
+WhatsApp message and a driver's Telegram message into a real, non-oversold
+Trip. All of it lives in `src/lib/matching/` — there is exactly one
+matching engine (`engine.ts`, statically guarded by
+`src/lib/matching/boundary.test.ts`'s "RT has exactly one matching engine"
+check) and exactly one write surface for the lifecycle transitions below
+(`orchestrate.ts`). `src/lib/matching/booking-state.ts`'s `deriveBookingState`
+is a pure, read-only projection of the real `TripRequest.status` /
+`Match.status` / `Trip.status` columns into the single human-readable
+`BookingState` used below — it never gates a transition itself; every real
+transition is a CAS-guarded write inside `orchestrate.ts`.
+
+### 7.1 Passenger Demand lifecycle (`TripRequest`)
+
+`PENDING` (just created, or back up for re-search after a decline/expiry/
+cancellation) → `MATCHING` (a `Match` has been proposed to a driver) →
+`MATCHED` (reserved for a future explicit "candidate found" UI state; not
+currently written by any transition) → `CONFIRMED` (a `Trip` exists) →
+terminal `COMPLETED` / `CANCELLED` / `EXPIRED`. `ingestPassengerMessage`
+(`src/lib/ingest.ts`) creates the row and immediately calls
+`proposeMatchesForRequest` — RT OFFICE's `rt_office.no_verified_supply_yet`
+fact (s.5) is logged when that call finds no candidate, so the demand/supply
+gap is itself an observable fact, not silence.
+
+### 7.2 Driver Offer lifecycle (`DriverOffer`)
+
+`OPEN` (fresh, full capacity) ⇄ `PARTIALLY_FILLED` (`seatsAvailable` has been
+decremented below `seatsTotal` by at least one confirmed booking, or restored
+back up after a cancellation) → `FULL` (`seatsAvailable` reaches 0) / `CLOSED`
+(explicitly closed) / `CANCELLED`. `seatsAvailable` is always the sole source
+of truth for remaining capacity — never a second counter — and every write to
+it is one of exactly three atomic paths: the passenger-confirm seat-decrement
+CAS (`handlePassengerResponse`), the cancellation seat-release increment
+(`cancelTrip`), or a driver's own free-text seat-count report
+(`setDriverReportedSeatsAvailable`, RT OFFICE telemetry, s.5.3), which also
+proactively invalidates (`invalidateMatchesExceedingSeats`) any pending
+`Match` now promising more seats than remain.
+
+### 7.3 Booking lifecycle (`BookingState`, `booking-state.ts`)
+
+```mermaid
+stateDiagram-v2
+    [*] --> DEMAND_CREATED: ingestPassengerMessage
+    DEMAND_CREATED --> SEARCHING: proposeMatchesForRequest finds no candidate yet
+    SEARCHING --> DRIVER_OFFERED: proposeToDriver (Match: PROPOSED_TO_DRIVER/AWAITING_DRIVER)
+    DRIVER_OFFERED --> SEARCHING: driver declines / driver response TTL expires -> next candidate
+    DRIVER_OFFERED --> SEAT_HELD: handleDriverResponse(accept) (Match: AWAITING_PASSENGER)
+    SEAT_HELD --> SEARCHING: passenger declines / passenger response TTL expires
+    SEAT_HELD --> BOOKED: handlePassengerResponse(accept) wins the seat-decrement CAS (Trip created, Match: CONFIRMED)
+    SEAT_HELD --> SEARCHING: handlePassengerResponse(accept) LOSES the seat-decrement CAS (Test 3/17 self-heal)
+    BOOKED --> IN_TRIP: markTripDeparted
+    IN_TRIP --> COMPLETED: markTripCompletedByDriverReport
+    BOOKED --> DRIVER_UNAVAILABLE: cancelTrip(actor=DRIVER) -> demand back to PENDING, rematch
+    IN_TRIP --> DRIVER_UNAVAILABLE: cancelTrip(actor=DRIVER) -> demand back to PENDING, rematch
+    BOOKED --> BREAKDOWN: handleDriverBreakdown -> cancelTrip(actor=SYSTEM, BREAKDOWN) -> rematch
+    IN_TRIP --> BREAKDOWN: handleDriverBreakdown -> cancelTrip(actor=SYSTEM, BREAKDOWN) -> rematch
+    BOOKED --> CANCELLED: cancelTrip(actor=PASSENGER) -> seat released, no rematch
+    DRIVER_OFFERED --> CANCELLED: cancelPendingDemand (passenger cancels before any Trip exists)
+    SEAT_HELD --> CANCELLED: cancelPendingDemand
+    DRIVER_OFFERED --> EXPIRED: expireStaleMatches sweep (no candidates left)
+    SEAT_HELD --> EXPIRED: expireStaleMatches sweep (no candidates left)
+```
+
+Every arrow above is a single CAS-guarded `updateMany` in `orchestrate.ts`
+(never a plain `update`), scoped to the exact status the transition expects
+— a lost race (`count === 0`) is always a safe no-op, never a silent
+overwrite. This is also the direct evidence for spec Test 20 ("illegal state
+transition cannot execute"): `cancelTrip` against a Trip that is no longer
+`SCHEDULED`/`IN_PROGRESS` matches zero rows and returns
+`{ cancelled: false }` without touching seats, audit log, or notifications
+(see `cancelTrip`'s dedicated test in `orchestrate.test.ts`).
+
+### 7.4 Seat Hold semantics
+
+A "seat hold" is not a separate reservation record — it is the
+`AWAITING_PASSENGER` `Match` status itself (spec's `SEAT_HELD` state). The
+seat is not actually decremented from `DriverOffer.seatsAvailable` at hold
+time; it is decremented exactly once, atomically, at passenger confirmation
+(`handlePassengerResponse`'s `db.driverOffer.updateMany({ where: { id,
+seatsAvailable: { gte: request.seats } }, data: { seatsAvailable: {
+decrement: request.seats } } })`). This is what makes the "two passengers
+race the last seat" scenario (Test 1) safe without a pre-reservation step:
+whichever confirmation's `updateMany` observes enough seats wins the
+`count === 1` race; the loser's `count === 0` unwinds its own dangling
+`CONFIRMED` Match back to `CANCELLED` (`SEAT_UNAVAILABLE`) and immediately
+re-triggers `proposeMatchesForRequest` for that passenger (Test 17) rather
+than leaving them stranded.
+
+### 7.5 TTL / response windows
+
+Two independently configurable windows (`matching/config.ts`,
+`MATCH_DRIVER_RESPONSE_TIMEOUT_MINUTES` / `MATCH_PASSENGER_RESPONSE_TIMEOUT_MINUTES`,
+default 15 minutes each), stamped onto `Match.expiresAt` when the row is
+created/advanced. `expireStaleMatches` (`matching/expiry.ts`) is the cron
+sweep (`src/app/api/cron/match-expiry`) that finds `AWAITING_DRIVER`/
+`AWAITING_PASSENGER` rows past `expiresAt` and expires them — but every
+expiry is itself a CAS-guarded `updateMany` scoped to the exact status being
+expired, so a sweep racing a real, just-landed driver/passenger response
+always loses cleanly to the real response (Test 4: "ACCEPT after offer
+expiry" is symmetric — the sweep can just as easily lose to a
+same-instant real ACCEPT as the reverse).
+
+### 7.6 Cancellation logic
+
+Three distinct entrypoints, all in `orchestrate.ts`, all idempotent and all
+routed through the shared `CANCEL_REASON` prefix convention
+(`booking-state.ts`) so the reason survives in the existing free-text
+`Match.declineReason`/`Trip.cancelReason` columns without a schema change:
+
+- **`cancelPendingDemand`** — passenger cancels before any `Trip` exists
+  (still `DRIVER_OFFERED`/`SEAT_HELD`). Cancels any active `Match`
+  (`rematch: false`) and marks the `TripRequest` `CANCELLED`. Idempotent: a
+  repeat call against an already-terminal request is a no-op (`claim.count === 0`).
+- **`cancelTrip(actor=PASSENGER)`** — passenger cancels an already-`BOOKED`
+  Trip (Test 9). Releases the seat back to `DriverOffer.seatsAvailable`
+  (clamped to `seatsTotal`, never trusting a runaway increment), notifies the
+  driver, and deliberately does **not** resurrect the passenger's own demand.
+- **`cancelTrip(actor=DRIVER | SYSTEM)`** — driver cancels (Test 8) or a
+  verified breakdown forces a cancellation (Test 6/7). Releases the seat the
+  same way, notifies the passenger honestly ("the driver became unavailable",
+  never blaming the passenger), puts the `TripRequest` back to `PENDING`, and
+  immediately calls `proposeMatchesForRequest` again — the passenger is never
+  left stranded on a dead booking.
+
+All three share `cancelTrip`'s single CAS guard
+(`db.trip.updateMany({ where: { id, status: { in: ["SCHEDULED",
+"IN_PROGRESS"] } }, ... })`), so a duplicate/redelivered cancel of any kind
+against an already-terminal Trip can never double-release a seat.
+
+### 7.7 Breakdown logic
+
+`handleDriverBreakdown(driverId)` is the one place that translates CRM
+Auto's verified, independently-owned `BREAKDOWN_INCIDENT` fact (s.5, CRM
+Auto never touches `Trip`/`Match` itself) into the real booking-lifecycle
+reaction: every currently active `Trip` (`SCHEDULED`/`IN_PROGRESS`) for that
+driver is cancelled via `cancelTrip(actor=SYSTEM, BREAKDOWN)`, and every
+still-negotiating `Match` (`PROPOSED_TO_DRIVER`/`AWAITING_DRIVER`/
+`AWAITING_PASSENGER`) is cancelled via `cancelActiveMatchForTripRequest(...,
+{ rematch: true })`. Test 7 ("breakdown almost simultaneous with a seat
+hold") is the closed race: if a `Match` was still negotiating in the
+breakdown handler's initial snapshot but a passenger `CONFIRM` lands a
+moment later and turns it into a real `Trip` before the cancellation loop
+reaches it, `cancelActiveMatchForTripRequest` observes the lost CAS
+(`count === 0`, "won" is `false`) and the handler falls through to a
+compensating `db.trip.findFirst` lookup (keyed off the same `tripRequestId`)
+that finds and cancels that just-created Trip too — a driver known to have
+broken down can never be left with a silently active booking.
+
+### 7.8 Idempotency
+
+Every mutating entrypoint in the booking lifecycle is safe to call twice
+with the same input:
+
+| Entrypoint | Guard |
+|---|---|
+| `ingestPassengerMessage` / `ingestDriverPrivateMessage` | `TripRequest.rawMessageId` / `DriverOffer.rawMessageId` real DB unique constraint (P2002-catch-and-refetch, Test 19) |
+| `handleDriverResponse` / `handlePassengerResponse` | CAS `updateMany` scoped to the exact expected `Match.status` (Test 2, Test 4b, Test 5) |
+| `cancelTrip` / `cancelPendingDemand` / `cancelActiveMatchForTripRequest` | CAS `updateMany` scoped to the exact expected `Trip`/`Match`/`TripRequest` status |
+| `markTripDeparted` / `markTripCompletedByDriverReport` | CAS `updateMany` scoped to the exact expected `Trip.status` (Test 12) |
+| `setDriverReportedSeatsAvailable` | CAS `updateMany` scoped to the offer still being open |
+| `recordOperationalEvent` (CRM Auto) | `DriveCrmEvent.idempotencyKey` real DB unique constraint (Test 3 webhook-delivered-twice equivalent) |
+
+None of these rely on a check-then-write read; every guard is the same
+compare-and-set write itself, so concurrent/duplicate delivery (Test 3) can
+never race past a `findFirst`.
+
+### 7.9 Event ordering
+
+The system never assumes a delivery order. Out-of-order or stale reports
+are always handled by re-deriving from current state rather than trusting
+a timestamp on the incoming message (Test 10, Test 11): a driver
+"departed" report against a Trip that already progressed past `SCHEDULED`
+is a safe no-op (`markTripDeparted`'s CAS), a completion report with no
+resolvable active-Trip context is recorded as history and replies honestly
+that no active trip was found (RT OFFICE telemetry, s.5.3) instead of
+guessing one, and a stale/duplicate seat-count report can never move
+`seatsAvailable` backwards past what the current CAS-guarded state already
+reflects.
+
+### 7.10 CRM ownership boundaries (recap)
+
+MATCH (`orchestrate.ts`) owns `TripRequest`/`Match`/`Trip`/`DriverOffer`
+writes exclusively. CRM Auto (s.5) owns `DriveCrmEvent` exclusively and
+never writes `Trip`/`Match` itself — `handleDriverBreakdown` above is the
+one, explicit place a verified CRM Auto fact is translated into a real
+booking mutation, keeping CRM Auto's own append-only role intact. Mira
+(`mira/outbound.ts`) is the sole outward voice for both driver and
+passenger — MATCH never calls the raw WhatsApp/Telegram adapters directly
+(statically guarded by `matching/boundary.test.ts`), and Mira never calls a
+CRM Auto mutation function directly either (statically guarded by
+`mira/boundary.test.ts`'s forbidden-import list) — every operational fact
+reaches the Driver CRM through CRM Auto's own recording entrypoints, called
+by MATCH/RT OFFICE, never by Mira.
+
+### 7.11 RT Core message flow
+
+```mermaid
+sequenceDiagram
+    participant P as Passenger (WhatsApp)
+    participant D as Driver (Telegram)
+    participant Ingest as ingest.ts
+    participant Match as matching/orchestrate.ts
+    participant Engine as matching/engine.ts
+    participant Mira as mira/outbound.ts
+    participant CRM as crm-auto
+
+    P->>Ingest: trip request text
+    Ingest->>Match: proposeMatchesForRequest
+    Match->>Engine: findCandidateOffers (ranked, RT-driver priority bonus)
+    Match->>Mira: notifyDriverPrivately (proposal)
+    Mira->>D: Telegram accept/decline buttons
+    D->>Match: handleDriverResponse(accept)
+    Match->>Mira: notifyPassengerWithConfirmButtons
+    Mira->>P: WhatsApp confirm buttons
+    P->>Match: handlePassengerResponse(accept)
+    Match->>Match: atomic seat-decrement CAS + Trip create
+    Match->>Mira: notify both sides (booked)
+    D->>CRM: telemetry text (breakdown/seats/ETA)
+    CRM->>Match: handleDriverBreakdown / setDriverReportedSeatsAvailable
+    Match->>Mira: notify affected passenger, rematch
+```

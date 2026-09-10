@@ -6,8 +6,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // that driver's Driver.status and DriverOffer.status both still look fine.
 // Unknown/missing breakdown data must never be treated as a breakdown.
 
-const { dbMocks, openBreakdownForDriversMock, latestOpenBreakdownForDriverMock, logActionMock, sendTelegramMessageMock } = vi.hoisted(() => ({
-  dbMocks: {
+const { dbMocks, openBreakdownForDriversMock, latestOpenBreakdownForDriverMock, logActionMock, sendTelegramMessageMock } = vi.hoisted(() => {
+  const dbMocks = {
     match: {
       findMany: vi.fn().mockResolvedValue([]),
       count: vi.fn().mockResolvedValue(0),
@@ -22,12 +22,20 @@ const { dbMocks, openBreakdownForDriversMock, latestOpenBreakdownForDriverMock, 
       findMany: vi.fn().mockResolvedValue([]),
       findUniqueOrThrow: vi.fn(),
     },
-  },
-  openBreakdownForDriversMock: vi.fn(),
-  latestOpenBreakdownForDriverMock: vi.fn(),
-  logActionMock: vi.fn().mockResolvedValue(undefined),
-  sendTelegramMessageMock: vi.fn().mockResolvedValue(undefined),
-}));
+    // proposeToDriver wraps its re-check-then-create in a transaction (defense
+    // in depth against the offer-double-hold race) — the mock just runs the
+    // callback against the same mocked db, same as Prisma's own interactive
+    // transaction semantics would for these tests' purposes.
+    $transaction: vi.fn(async (fn: (tx: typeof dbMocks) => unknown) => fn(dbMocks)),
+  };
+  return {
+    dbMocks,
+    openBreakdownForDriversMock: vi.fn(),
+    latestOpenBreakdownForDriverMock: vi.fn(),
+    logActionMock: vi.fn().mockResolvedValue(undefined),
+    sendTelegramMessageMock: vi.fn().mockResolvedValue(undefined),
+  };
+});
 
 vi.mock("@/lib/db", () => ({ db: dbMocks }));
 vi.mock("@/lib/audit", () => ({ logAction: logActionMock }));

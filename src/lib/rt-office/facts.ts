@@ -47,6 +47,8 @@ function toMatchableOffer(o: OfferWithRelations): MatchableOffer {
     driverId: o.driverId,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     driverStatus: o.driver.status as any,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    driverCategory: o.driver.category as any,
     origin: o.origin,
     destination: o.destination,
     travelDate: o.travelDate,

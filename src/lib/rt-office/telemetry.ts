@@ -19,7 +19,7 @@ import type { Lang } from "@/lib/i18n/messages";
 import { classifyDriverTelemetryText, type DriverTelemetrySignalType } from "./telemetry-classify";
 import { findEventByIdempotencyKey, operationalHistoryForArtur } from "@/lib/crm-auto/bridge";
 import { openBreakdownIncident, recordOperationalEvent, resolveBreakdownIncident } from "@/lib/crm-auto/orchestrator";
-import { markTripCompletedByDriverReport, markTripDeparted, setDriverReportedSeatsAvailable } from "@/lib/matching/orchestrate";
+import { handleDriverBreakdown, markTripCompletedByDriverReport, markTripDeparted, setDriverReportedSeatsAvailable } from "@/lib/matching/orchestrate";
 import { resolveRouteIntelligence } from "@/lib/jolchu/orchestrator";
 import {
   NON_TERMINAL_TRIP_STATUSES,
@@ -259,6 +259,15 @@ export async function ingestDriverTelemetryText(params: DriverTelemetryIngestPar
           idempotencyKey,
           details: { tripId, offerId, rawText: params.rawText },
         });
+        // CRM Auto only records the fact (its write boundary forbids
+        // touching Trip/Match/DriverOffer itself) — this is the one call
+        // site translating a freshly-opened breakdown into the actual
+        // booking-lifecycle reaction (spec s.7F): cancel this driver's
+        // active bookings and rematch their stranded passengers. Only runs
+        // on the success path, so a redelivered/duplicate BREAKDOWN_OPENED
+        // against an already-open incident (caught below) can't re-trigger
+        // a second round of cancellations.
+        await handleDriverBreakdown(driver.id);
         replyText = t(lang, "Записал поломку, диспетчер уведомлён.", "Бузулганды жаздым, диспетчер кабардар болду.", "Breakdown recorded, dispatch has been notified.");
       } catch {
         await logAgentAction({ ctx, agent: "RT_OFFICE", action: "rt_office.telemetry_rejected", entityType: "Driver", entityId: driver.id, details: { signalType } });

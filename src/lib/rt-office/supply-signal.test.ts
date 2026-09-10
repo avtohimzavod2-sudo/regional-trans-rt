@@ -40,8 +40,8 @@ const requestFixture = {
   passenger: { whatsappId: "wa-pax-1", preferredLang: "RU" },
 };
 
-const { dbMocks, notifyDriverPrivatelyMock } = vi.hoisted(() => ({
-  dbMocks: {
+const { dbMocks, notifyDriverPrivatelyMock } = vi.hoisted(() => {
+  const dbMocks = {
     driverOffer: {
       findUnique: vi.fn(),
       findUniqueOrThrow: vi.fn(),
@@ -62,9 +62,13 @@ const { dbMocks, notifyDriverPrivatelyMock } = vi.hoisted(() => ({
     auditLogEntry: {
       create: vi.fn().mockResolvedValue({}),
     },
-  },
-  notifyDriverPrivatelyMock: vi.fn().mockResolvedValue(undefined),
-}));
+    // proposeToDriver wraps its re-check-then-create in a transaction
+    // (defense in depth against the offer-double-hold race) — the mock
+    // just runs the callback against the same mocked db.
+    $transaction: vi.fn(async (fn: (tx: typeof dbMocks) => unknown) => fn(dbMocks)),
+  };
+  return { dbMocks, notifyDriverPrivatelyMock: vi.fn().mockResolvedValue(undefined) };
+});
 
 vi.mock("@/lib/db", () => ({ db: dbMocks }));
 vi.mock("@/lib/mira/outbound", () => ({

@@ -295,7 +295,7 @@ model TripRequest {
   travelingWithChildren Boolean       @default(false)
   status                RequestStatus @default(PENDING)
   sourceChannel         Channel       @default(WHATSAPP)
-  rawMessageId          String?
+  rawMessageId          String?       @unique
   rawMessage            RawMessage?   @relation(fields: [rawMessageId], references: [id])
   expiresAt             DateTime?
   createdAt             DateTime      @default(now())
@@ -321,7 +321,7 @@ model DriverOffer {
   seatsAvailable      Int
   status              OfferStatus @default(OPEN)
   sourceChannel       Channel     @default(TELEGRAM_BOT)
-  rawMessageId        String?
+  rawMessageId        String?     @unique
   rawMessage          RawMessage? @relation(fields: [rawMessageId], references: [id])
   isReturnLeg         Boolean     @default(false)
   generatedFromTripId String?

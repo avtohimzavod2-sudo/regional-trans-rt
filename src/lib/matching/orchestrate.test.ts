@@ -36,16 +36,20 @@ const requestRecord = {
 // a plain `const dbMocks = {...}` above the vi.mock call would still throw
 // a TDZ ReferenceError at module-eval time.
 const { dbMocks, logActionMock, sendTelegramMessageMock, sendWhatsAppTextMock, sendWhatsAppConfirmButtonsMock, assertSafeToRevealMock, openSupportCaseMock } =
-  vi.hoisted(() => ({
-    dbMocks: {
+  vi.hoisted(() => {
+    const dbMocks = {
       match: {
         findUniqueOrThrow: vi.fn(),
+        findFirst: vi.fn().mockResolvedValue(null),
+        findMany: vi.fn().mockResolvedValue([]),
         updateMany: vi.fn(),
         update: vi.fn().mockResolvedValue({}),
+        create: vi.fn(),
         count: vi.fn().mockResolvedValue(0),
       },
       tripRequest: {
         update: vi.fn().mockResolvedValue({}),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
         findUniqueOrThrow: vi.fn(),
       },
       driverOffer: {
@@ -58,15 +62,24 @@ const { dbMocks, logActionMock, sendTelegramMessageMock, sendWhatsAppTextMock, s
         create: vi.fn(),
         updateMany: vi.fn(),
         findUniqueOrThrow: vi.fn(),
+        findMany: vi.fn().mockResolvedValue([]),
+        findFirst: vi.fn().mockResolvedValue(null),
       },
-    },
-    logActionMock: vi.fn().mockResolvedValue(undefined),
-    sendTelegramMessageMock: vi.fn().mockResolvedValue(undefined),
-    sendWhatsAppTextMock: vi.fn().mockResolvedValue(undefined),
-    sendWhatsAppConfirmButtonsMock: vi.fn().mockResolvedValue(undefined),
-    assertSafeToRevealMock: vi.fn().mockResolvedValue({ allowed: true }),
-    openSupportCaseMock: vi.fn().mockResolvedValue({}),
-  }));
+      // proposeToDriver wraps its re-check-then-create in a transaction
+      // (defense in depth against the offer-double-hold race) — the mock
+      // just runs the callback against the same mocked db.
+      $transaction: vi.fn(async (fn: (tx: typeof dbMocks) => unknown) => fn(dbMocks)),
+    };
+    return {
+      dbMocks,
+      logActionMock: vi.fn().mockResolvedValue(undefined),
+      sendTelegramMessageMock: vi.fn().mockResolvedValue(undefined),
+      sendWhatsAppTextMock: vi.fn().mockResolvedValue(undefined),
+      sendWhatsAppConfirmButtonsMock: vi.fn().mockResolvedValue(undefined),
+      assertSafeToRevealMock: vi.fn().mockResolvedValue({ allowed: true }),
+      openSupportCaseMock: vi.fn().mockResolvedValue({}),
+    };
+  });
 
 vi.mock("@/lib/db", () => ({ db: dbMocks }));
 vi.mock("@/lib/audit", () => ({ logAction: logActionMock }));
@@ -87,7 +100,10 @@ vi.mock("@/lib/agents/pay", () => ({
 }));
 
 import { messages } from "@/lib/i18n/messages";
+import { CANCEL_REASON } from "./booking-state";
 import {
+  cancelTrip,
+  handleDriverBreakdown,
   handleDriverResponse,
   handlePassengerResponse,
   markTripCompletedByDriverReport,
@@ -140,15 +156,24 @@ describe("handlePassengerResponse", () => {
     expect(dbMocks.trip.create).not.toHaveBeenCalled();
   });
 
-  it("opens a support case instead of overbooking when seats are exhausted by a concurrent confirmation", async () => {
+  it("Test 3/17 — never overbooks when seats are exhausted by a concurrent confirmation, and automatically self-heals by rematching instead of waiting on a human", async () => {
     dbMocks.match.updateMany.mockResolvedValue({ count: 1 });
     dbMocks.driverOffer.updateMany.mockResolvedValue({ count: 0 });
 
     await handlePassengerResponse("match-1", true);
 
-    expect(openSupportCaseMock).toHaveBeenCalledTimes(1);
+    // The dangling CONFIRMED Match is unwound to CANCELLED (CAS-guarded, so
+    // this can only ever happen once) with a SEAT_UNAVAILABLE reason...
+    expect(dbMocks.match.updateMany).toHaveBeenCalledWith({
+      where: { id: "match-1", status: "CONFIRMED" },
+      data: expect.objectContaining({ status: "CANCELLED" }),
+    });
     expect(logActionMock).toHaveBeenCalledWith(expect.objectContaining({ action: "match.seat_decrement_failed" }));
+    // ...the demand goes back up for search rather than being left dangling...
+    expect(dbMocks.tripRequest.update).toHaveBeenCalledWith({ where: { id: "req-1" }, data: { status: "PENDING" } });
+    // ...and no Trip/booking is ever created off the back of a failed hold.
     expect(dbMocks.trip.create).not.toHaveBeenCalled();
+    expect(openSupportCaseMock).not.toHaveBeenCalled();
   });
 
   it("treats a duplicate decline delivery as a safe no-op once another call already advanced the match", async () => {
@@ -214,7 +239,7 @@ describe("handleDriverResponse", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     dbMocks.match.findUniqueOrThrow.mockResolvedValue(driverResponseMatchRecord);
-    dbMocks.match.update.mockResolvedValue({});
+    dbMocks.match.updateMany.mockResolvedValue({ count: 1 });
     dbMocks.match.count.mockResolvedValue(0);
     dbMocks.tripRequest.update.mockResolvedValue({});
     // Status deliberately outside {PENDING, MATCHING} so proposeMatchesForRequest's
@@ -223,11 +248,11 @@ describe("handleDriverResponse", () => {
     dbMocks.tripRequest.findUniqueOrThrow.mockResolvedValue({ id: "req-2", status: "CONFIRMED" });
   });
 
-  it("Test 4 — driver declines: marks the match DECLINED_BY_DRIVER and re-triggers matching for the same request, never a new one", async () => {
+  it("Test 4 — driver declines: marks the match DECLINED_BY_DRIVER (CAS-guarded) and re-triggers matching for the same request, never a new one", async () => {
     const updated = await handleDriverResponse("match-2", false);
 
-    expect(dbMocks.match.update).toHaveBeenCalledWith({
-      where: { id: "match-2" },
+    expect(dbMocks.match.updateMany).toHaveBeenCalledWith({
+      where: { id: "match-2", status: "AWAITING_DRIVER" },
       data: expect.objectContaining({ status: "DECLINED_BY_DRIVER" }),
     });
     expect(logActionMock).toHaveBeenCalledWith(expect.objectContaining({ action: "match.declined_by_driver", entityId: "match-2" }));
@@ -235,16 +260,26 @@ describe("handleDriverResponse", () => {
     // engine) — its first read is the active-match guard for this request.
     expect(dbMocks.match.count).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ tripRequestId: "req-2" }) }));
     expect(sendWhatsAppConfirmButtonsMock).not.toHaveBeenCalled();
-    expect(updated).toEqual({});
+    expect(updated).toEqual(driverResponseMatchRecord);
   });
 
-  it("Test 5 — driver accepts: moves the match to AWAITING_PASSENGER and asks the passenger to confirm", async () => {
-    dbMocks.match.update.mockResolvedValue({ ...driverResponseMatchRecord, status: "AWAITING_PASSENGER" });
+  it("Test 4b — a lost CAS race (match already settled elsewhere) is a clean no-op, not a duplicate decline", async () => {
+    dbMocks.match.updateMany.mockResolvedValue({ count: 0 });
+
+    await handleDriverResponse("match-2", false);
+
+    expect(logActionMock).not.toHaveBeenCalledWith(expect.objectContaining({ action: "match.declined_by_driver" }));
+  });
+
+  it("Test 5 — driver accepts: moves the match to AWAITING_PASSENGER (CAS-guarded) and asks the passenger to confirm", async () => {
+    dbMocks.match.findUniqueOrThrow
+      .mockResolvedValueOnce(driverResponseMatchRecord)
+      .mockResolvedValueOnce({ ...driverResponseMatchRecord, status: "AWAITING_PASSENGER" });
 
     const updated = await handleDriverResponse("match-2", true);
 
-    expect(dbMocks.match.update).toHaveBeenCalledWith({
-      where: { id: "match-2" },
+    expect(dbMocks.match.updateMany).toHaveBeenCalledWith({
+      where: { id: "match-2", status: "AWAITING_DRIVER" },
       data: expect.objectContaining({ status: "AWAITING_PASSENGER" }),
     });
     expect(sendWhatsAppConfirmButtonsMock).toHaveBeenCalledWith(
@@ -262,8 +297,21 @@ describe("handleDriverResponse", () => {
     const result = await handleDriverResponse("match-2", true);
 
     expect(result.status).toBe("DECLINED_BY_DRIVER");
-    expect(dbMocks.match.update).not.toHaveBeenCalled();
+    expect(dbMocks.match.updateMany).not.toHaveBeenCalled();
     expect(sendWhatsAppConfirmButtonsMock).not.toHaveBeenCalled();
+  });
+
+  it("Test 2 — double ACCEPT from the same driver: the second call is a safe no-op, never re-sending the passenger confirmation twice", async () => {
+    dbMocks.match.findUniqueOrThrow
+      .mockResolvedValueOnce(driverResponseMatchRecord) // 1st ACCEPT's initial read: still AWAITING_DRIVER
+      .mockResolvedValueOnce({ ...driverResponseMatchRecord, status: "AWAITING_PASSENGER" }) // 1st ACCEPT's final re-read
+      .mockResolvedValueOnce({ ...driverResponseMatchRecord, status: "AWAITING_PASSENGER" }); // 2nd ACCEPT's initial read: already advanced
+
+    await handleDriverResponse("match-2", true);
+    await handleDriverResponse("match-2", true);
+
+    expect(dbMocks.match.updateMany).toHaveBeenCalledTimes(1);
+    expect(sendWhatsAppConfirmButtonsMock).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -397,5 +445,170 @@ describe("markTripCompletedByDriverReport", () => {
     expect(dbMocks.driverOffer.create).not.toHaveBeenCalled();
     expect(logActionMock).not.toHaveBeenCalledWith(expect.objectContaining({ action: "trip.completed" }));
     expect(result).toEqual({ returnOffer: null, alreadyCompleted: true });
+  });
+});
+
+describe("cancelTrip", () => {
+  const tripFixture = {
+    id: "trip-1",
+    matchId: "match-1",
+    driverOfferId: "offer-1",
+    seats: 2,
+    driver: { telegramUserId: "tg-driver-1", preferredLang: "RU" },
+    passenger: { whatsappId: "wa-pax-1", preferredLang: "RU" },
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    dbMocks.trip.findUniqueOrThrow.mockResolvedValue(tripFixture);
+    // Released seats stay within capacity and the offer isn't FULL/CLOSED, so
+    // the "clamp to capacity" branch inside cancelTrip never fires — keeps
+    // these tests focused on the cancellation/rematch behavior itself.
+    dbMocks.driverOffer.update.mockResolvedValue({ id: "offer-1", seatsAvailable: 2, seatsTotal: 4, status: "PARTIALLY_FILLED" });
+    dbMocks.match.updateMany.mockResolvedValue({ count: 1 });
+    dbMocks.match.findUniqueOrThrow.mockResolvedValue({ id: "match-1", tripRequestId: "req-1" });
+    dbMocks.tripRequest.update.mockResolvedValue({});
+    dbMocks.match.count.mockResolvedValue(0);
+    // Bails proposeMatchesForRequest's re-trigger out immediately after the
+    // active-match guard — this describe block is about cancelTrip's own
+    // behavior, not the downstream MATCH engine.
+    dbMocks.tripRequest.findUniqueOrThrow.mockResolvedValue({ id: "req-1", status: "CONFIRMED" });
+  });
+
+  it("Test 9 — passenger cancellation releases the held seat back to the driver's offer, without resurrecting the passenger's own demand", async () => {
+    dbMocks.trip.updateMany.mockResolvedValue({ count: 1 });
+
+    const result = await cancelTrip("trip-1", "PASSENGER", CANCEL_REASON.PASSENGER_CANCELLED);
+
+    expect(dbMocks.trip.updateMany).toHaveBeenCalledWith({
+      where: { id: "trip-1", status: { in: ["SCHEDULED", "IN_PROGRESS"] } },
+      data: expect.objectContaining({ status: "CANCELLED" }),
+    });
+    expect(dbMocks.driverOffer.update).toHaveBeenCalledWith({
+      where: { id: "offer-1" },
+      data: { seatsAvailable: { increment: 2 } },
+    });
+    expect(sendTelegramMessageMock).toHaveBeenCalledWith("tg-driver-1", messages.tripCancelledByPassengerForDriver.RU);
+    // A passenger cancelling their own trip must not re-trigger a search for themselves.
+    expect(dbMocks.tripRequest.update).not.toHaveBeenCalled();
+    expect(sendWhatsAppTextMock).not.toHaveBeenCalled();
+    expect(result).toEqual({ tripId: "trip-1", cancelled: true });
+  });
+
+  it("Test 8 — driver cancellation after BOOKED releases the seat and automatically re-searches a new driver for the stranded passenger", async () => {
+    dbMocks.trip.updateMany.mockResolvedValue({ count: 1 });
+
+    const result = await cancelTrip("trip-1", "DRIVER", CANCEL_REASON.DRIVER_CANCELLED);
+
+    expect(dbMocks.driverOffer.update).toHaveBeenCalledWith({
+      where: { id: "offer-1" },
+      data: { seatsAvailable: { increment: 2 } },
+    });
+    expect(sendWhatsAppTextMock).toHaveBeenCalledWith("wa-pax-1", messages.tripCancelledByDriverForPassenger.RU);
+    // The passenger did nothing wrong — their demand goes back to PENDING and
+    // the real, single MATCH engine is re-triggered for the same request.
+    expect(dbMocks.tripRequest.update).toHaveBeenCalledWith({ where: { id: "req-1" }, data: { status: "PENDING" } });
+    expect(dbMocks.match.count).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ tripRequestId: "req-1" }) }));
+    expect(result).toEqual({ tripId: "trip-1", cancelled: true });
+  });
+
+  it("Test 20 — illegal state transition: cancelling a trip that is no longer SCHEDULED/IN_PROGRESS is a safe no-op, never a second seat release", async () => {
+    // Simulates a duplicate/redelivered cancel (or a stale actor) racing
+    // against a trip that already finished, or was already cancelled.
+    dbMocks.trip.updateMany.mockResolvedValue({ count: 0 });
+
+    const result = await cancelTrip("trip-1", "SYSTEM", CANCEL_REASON.BREAKDOWN);
+
+    expect(dbMocks.driverOffer.update).not.toHaveBeenCalled();
+    expect(logActionMock).not.toHaveBeenCalled();
+    expect(dbMocks.tripRequest.update).not.toHaveBeenCalled();
+    expect(result).toEqual({ tripId: "trip-1", cancelled: false });
+  });
+});
+
+describe("handleDriverBreakdown", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    dbMocks.match.updateMany.mockResolvedValue({ count: 1 });
+    dbMocks.match.count.mockResolvedValue(0);
+    dbMocks.tripRequest.update.mockResolvedValue({});
+    dbMocks.tripRequest.findUniqueOrThrow.mockResolvedValue({ id: "req-x", status: "CONFIRMED" });
+  });
+
+  it("cancels every active Trip for the driver and every still-negotiating Match, rematching each affected demand", async () => {
+    dbMocks.trip.findMany.mockResolvedValueOnce([{ id: "trip-1" }]); // activeTrips snapshot
+    dbMocks.trip.updateMany.mockResolvedValue({ count: 1 });
+    dbMocks.trip.findUniqueOrThrow.mockResolvedValue({
+      id: "trip-1",
+      matchId: "match-1",
+      driverOfferId: "offer-1",
+      seats: 2,
+      driver: { telegramUserId: "tg-driver-1", preferredLang: "RU" },
+      passenger: { whatsappId: "wa-pax-1", preferredLang: "RU" },
+    });
+    dbMocks.driverOffer.update.mockResolvedValue({ id: "offer-1", seatsAvailable: 2, seatsTotal: 4, status: "PARTIALLY_FILLED" });
+    dbMocks.match.findUniqueOrThrow.mockResolvedValue({ id: "match-1", tripRequestId: "req-1" });
+
+    dbMocks.match.findMany.mockResolvedValueOnce([{ tripRequestId: "req-2" }]); // activeMatches snapshot
+    dbMocks.match.findFirst.mockResolvedValueOnce({
+      id: "match-2",
+      status: "AWAITING_DRIVER",
+      tripRequestId: "req-2",
+      driverOffer: { driver: { preferredLang: "RU", telegramUserId: "tg-driver-1" } },
+      tripRequest: { passenger: { whatsappId: "wa-pax-2", preferredLang: "RU" } },
+    });
+
+    const result = await handleDriverBreakdown("driver-1");
+
+    expect(dbMocks.driverOffer.update).toHaveBeenCalledWith({
+      where: { id: "offer-1" },
+      data: { seatsAvailable: { increment: 2 } },
+    });
+    expect(sendTelegramMessageMock).toHaveBeenCalledWith("tg-driver-1", messages.pendingMatchCancelledForDriver.RU);
+    expect(sendWhatsAppTextMock).toHaveBeenCalledWith("wa-pax-2", messages.driverBreakdownForPassenger.RU);
+    // db.trip.findFirst (the race-compensation lookup) must not fire when the
+    // match cancellation cleanly won its own CAS race.
+    expect(dbMocks.trip.findFirst).not.toHaveBeenCalled();
+    expect(result).toEqual({ cancelledTrips: 1, cancelledMatches: 1 });
+  });
+
+  it("Test 7 — a match still negotiating in the breakdown snapshot but that raced to a real Trip a moment later is cancelled too, never left silently active against a broken-down driver", async () => {
+    dbMocks.trip.findMany.mockResolvedValueOnce([]); // nothing had become a Trip yet at the top-level snapshot
+    dbMocks.match.findMany.mockResolvedValueOnce([{ tripRequestId: "req-3" }]); // still negotiating in this snapshot
+    // cancelActiveMatchForTripRequest's own re-read loses: the match is no
+    // longer in ACTIVE_MATCH_STATUSES because a passenger CONFIRM landed a
+    // moment ago and turned it into a real Trip.
+    dbMocks.match.findFirst.mockResolvedValueOnce(null);
+
+    dbMocks.trip.findFirst.mockResolvedValueOnce({ id: "trip-race" });
+    dbMocks.trip.updateMany.mockResolvedValue({ count: 1 });
+    dbMocks.trip.findUniqueOrThrow.mockResolvedValue({
+      id: "trip-race",
+      matchId: "match-3",
+      driverOfferId: "offer-3",
+      seats: 1,
+      driver: { telegramUserId: "tg-driver-1", preferredLang: "RU" },
+      passenger: { whatsappId: "wa-pax-3", preferredLang: "RU" },
+    });
+    dbMocks.driverOffer.update.mockResolvedValue({ id: "offer-3", seatsAvailable: 1, seatsTotal: 4, status: "PARTIALLY_FILLED" });
+    dbMocks.match.findUniqueOrThrow.mockResolvedValue({ id: "match-3", tripRequestId: "req-3" });
+
+    const result = await handleDriverBreakdown("driver-1");
+
+    expect(dbMocks.trip.findFirst).toHaveBeenCalledWith({
+      where: { driverId: "driver-1", match: { tripRequestId: "req-3" }, status: { in: ["SCHEDULED", "IN_PROGRESS"] } },
+    });
+    expect(dbMocks.trip.updateMany).toHaveBeenCalledWith({
+      where: { id: "trip-race", status: { in: ["SCHEDULED", "IN_PROGRESS"] } },
+      data: expect.objectContaining({ status: "CANCELLED" }),
+    });
+    expect(dbMocks.driverOffer.update).toHaveBeenCalledWith({
+      where: { id: "offer-3" },
+      data: { seatsAvailable: { increment: 1 } },
+    });
+    expect(sendWhatsAppTextMock).toHaveBeenCalledWith("wa-pax-3", messages.driverBreakdownForPassenger.RU);
+    // Neither the top-level activeTrips snapshot nor the match-cancellation
+    // CAS itself "won" here — the race-compensation branch is what caught it.
+    expect(result).toEqual({ cancelledTrips: 0, cancelledMatches: 0 });
   });
 });

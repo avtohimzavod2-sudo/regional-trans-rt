@@ -31,7 +31,20 @@ export function canResolveWithoutNote(caseType: SupportCaseType): boolean {
 
 export async function openSupportCase(
   ctx: AgentContext,
-  params: { tripId?: string; caseType: SupportCaseType; openedByType: ActorType; openedById?: string; description?: string },
+  params: {
+    tripId?: string;
+    caseType: SupportCaseType;
+    openedByType: ActorType;
+    openedById?: string;
+    description?: string;
+    /** Set when the caller (matching/orchestrate.ts's cancelTrip) has already
+     * performed the CAS-guarded Trip cancellation itself — e.g. to also
+     * release the held seat and trigger rematch, neither of which this
+     * function knows how to do. Skips the plain, non-CAS-guarded Trip.update
+     * below so it can't clobber the reason-code-prefixed cancelReason
+     * cancelTrip already wrote (see booking-state.ts's CANCEL_REASON). */
+    skipTripStatusUpdate?: boolean;
+  },
 ) {
   const status = initialStatusFor(params.caseType);
 
@@ -47,7 +60,7 @@ export async function openSupportCase(
     },
   });
 
-  if (params.tripId && (params.caseType === "CANCELLATION" || params.caseType === "DRIVER_NO_SHOW" || params.caseType === "PASSENGER_NO_SHOW")) {
+  if (!params.skipTripStatusUpdate && params.tripId && (params.caseType === "CANCELLATION" || params.caseType === "DRIVER_NO_SHOW" || params.caseType === "PASSENGER_NO_SHOW")) {
     await db.trip.update({
       where: { id: params.tripId },
       data: { status: params.caseType === "CANCELLATION" ? "CANCELLED" : "NO_SHOW", cancelReason: params.description },

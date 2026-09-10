@@ -12,8 +12,10 @@ import { chargeCommissionForTrip, CommissionAlreadyChargedError } from "@/lib/ag
 import { openSupportCase } from "@/lib/agents/support";
 import { latestOpenBreakdownForDriver, openBreakdownForDrivers } from "@/lib/crm-auto/bridge";
 import { getDriverResponseTimeoutMinutes, getPassengerResponseTimeoutMinutes } from "./config";
+import { CANCEL_REASON, formatCancelReason, type CancelReasonCode } from "./booking-state";
 
 const ACTIVE_MATCH_STATUSES = ["PROPOSED_TO_DRIVER", "AWAITING_DRIVER", "AWAITING_PASSENGER"] as const;
+type ActiveMatchStatus = (typeof ACTIVE_MATCH_STATUSES)[number];
 
 function toMatchableRequest(r: {
   id: string;
@@ -30,7 +32,7 @@ function toMatchableRequest(r: {
 function toMatchableOffer(o: {
   id: string;
   driverId: string;
-  driver: { status: string };
+  driver: { status: string; category: string };
   origin: { id: string; corridorId: string; order: number };
   destination: { id: string; corridorId: string; order: number };
   travelDate: Date;
@@ -45,6 +47,8 @@ function toMatchableOffer(o: {
     driverId: o.driverId,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     driverStatus: o.driver.status as any,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    driverCategory: o.driver.category as any,
     origin: o.origin,
     destination: o.destination,
     travelDate: o.travelDate,
@@ -83,17 +87,42 @@ async function hasActiveMatch(where: { tripRequestId?: string; driverOfferId?: s
   return count > 0;
 }
 
+/** Batched form of hasActiveMatch({driverOfferId}) for filtering a whole
+ * candidate list in one query instead of one count() per offer (spec s.5:
+ * an offer already mid-negotiation with one passenger must not also be
+ * proposed to a second, concurrent passenger — see proposeMatchesForRequest,
+ * which is the one direction that used to skip this check entirely). */
+async function offerIdsWithActiveMatch(offerIds: string[]): Promise<Set<string>> {
+  if (offerIds.length === 0) return new Set();
+  const active = await db.match.findMany({
+    where: { driverOfferId: { in: offerIds }, status: { in: [...ACTIVE_MATCH_STATUSES] } },
+    select: { driverOfferId: true },
+  });
+  return new Set(active.map((m) => m.driverOfferId));
+}
+
 async function proposeToDriver(requestId: string, offerId: string) {
   const now = new Date();
-  const match = await db.match.create({
-    data: {
-      tripRequestId: requestId,
-      driverOfferId: offerId,
-      status: "AWAITING_DRIVER",
-      proposedToDriverAt: now,
-      expiresAt: new Date(now.getTime() + getDriverResponseTimeoutMinutes() * 60_000),
-    },
+  // Re-check-and-create inside one transaction: narrows (does not by itself
+  // fully eliminate under every isolation level, hence the caller-side
+  // pre-filter above too) the window in which two concurrent proposals could
+  // both target the same offer. The airtight, DB-proven guarantee against an
+  // actual double-booking remains handlePassengerResponse's seat-decrement
+  // CAS below — this is defense in depth, not the sole guard.
+  const match = await db.$transaction(async (tx) => {
+    const activeCount = await tx.match.count({ where: { driverOfferId: offerId, status: { in: [...ACTIVE_MATCH_STATUSES] } } });
+    if (activeCount > 0) return null;
+    return tx.match.create({
+      data: {
+        tripRequestId: requestId,
+        driverOfferId: offerId,
+        status: "AWAITING_DRIVER",
+        proposedToDriverAt: now,
+        expiresAt: new Date(now.getTime() + getDriverResponseTimeoutMinutes() * 60_000),
+      },
+    });
   });
+  if (!match) return null;
 
   const [request, offer] = await Promise.all([
     db.tripRequest.findUniqueOrThrow({
@@ -153,7 +182,15 @@ export async function proposeMatchesForRequest(requestId: string) {
   const breakdownByDriver = await openBreakdownForDrivers(offers.map((o) => o.driverId));
   const operationallyEligibleOffers = offers.filter((o) => !breakdownByDriver.get(o.driverId));
 
-  const candidates = findCandidateOffers(toMatchableRequest(request), operationallyEligibleOffers.map(toMatchableOffer));
+  // Spec s.5: an offer already mid-negotiation with another passenger is not
+  // usable supply for this request either — without this, two different
+  // TripRequests could each get an active Match against the very same offer
+  // at the same time (proposeMatchesForOffer already guarded its own
+  // single-offer entrypoint against this; this direction did not).
+  const activeOfferIds = await offerIdsWithActiveMatch(operationallyEligibleOffers.map((o) => o.id));
+  const availableOffers = operationallyEligibleOffers.filter((o) => !activeOfferIds.has(o.id));
+
+  const candidates = findCandidateOffers(toMatchableRequest(request), availableOffers.map(toMatchableOffer));
   if (candidates.length === 0) return null;
 
   return proposeToDriver(requestId, candidates[0].offer.id);
@@ -199,21 +236,29 @@ export async function handleDriverResponse(matchId: string, accepted: boolean) {
       driverOffer: { include: { driver: true } },
     },
   });
+  // Read-then-branch alone is not enough to guard the write below (a
+  // duplicate Telegram button tap, or ACCEPT+DECLINE racing, could both pass
+  // this check before either write commits). Every actual transition is
+  // additionally guarded by the atomic updateMany CAS immediately below,
+  // matching the idiom already used in handlePassengerResponse — this
+  // upfront check is just a cheap early-exit for the already-settled case.
   if (match.status !== "AWAITING_DRIVER") return match;
 
   if (!accepted) {
-    const updated = await db.match.update({
-      where: { id: matchId },
+    const declineResult = await db.match.updateMany({
+      where: { id: matchId, status: "AWAITING_DRIVER" },
       data: { status: "DECLINED_BY_DRIVER", driverRespondedAt: new Date() },
     });
+    if (declineResult.count === 0) return db.match.findUniqueOrThrow({ where: { id: matchId } });
+
     await logAction({ actorType: "AGENT", action: "match.declined_by_driver", entityType: "Match", entityId: matchId });
     await proposeMatchesForRequest(match.tripRequestId);
-    return updated;
+    return db.match.findUniqueOrThrow({ where: { id: matchId } });
   }
 
   const now = new Date();
-  const updated = await db.match.update({
-    where: { id: matchId },
+  const acceptResult = await db.match.updateMany({
+    where: { id: matchId, status: "AWAITING_DRIVER" },
     data: {
       status: "AWAITING_PASSENGER",
       driverRespondedAt: now,
@@ -221,6 +266,7 @@ export async function handleDriverResponse(matchId: string, accepted: boolean) {
       expiresAt: new Date(now.getTime() + getPassengerResponseTimeoutMinutes() * 60_000),
     },
   });
+  if (acceptResult.count === 0) return db.match.findUniqueOrThrow({ where: { id: matchId } });
 
   const lang = (match.tripRequest.passenger.preferredLang ?? "RU") as Lang;
   const text = messages.proposalToPassenger[lang](
@@ -232,7 +278,7 @@ export async function handleDriverResponse(matchId: string, accepted: boolean) {
   await notifyPassengerWithConfirmButtons(match.tripRequest.passenger.whatsappId, text, matchId);
 
   await logAction({ actorType: "AGENT", action: "match.confirmed_by_driver", entityType: "Match", entityId: matchId });
-  return updated;
+  return db.match.findUniqueOrThrow({ where: { id: matchId } });
 }
 
 export async function handlePassengerResponse(matchId: string, accepted: boolean) {
@@ -290,14 +336,15 @@ export async function handlePassengerResponse(matchId: string, accepted: boolean
   if (seatUpdateResult.count === 0) {
     // Match is already CONFIRMED above, so we cannot silently drop this —
     // seats were genuinely exhausted by another confirmation between
-    // proposal and this response. Never invent availability: open a support
-    // case for a human to resolve instead.
-    const ctx = rootContext();
-    await openSupportCase(ctx, {
-      caseType: "OTHER",
-      openedByType: "AGENT",
-      openedById: "MATCHING",
-      description: `Seat decrement failed on passenger confirmation: offer ${match.driverOfferId} no longer had ${request.seats} seat(s) available (matchId ${matchId}).`,
+    // proposal and this response (spec s.7C: "seats ran out between OFFER
+    // and ACCEPT"). Never invent availability, and never leave the passenger
+    // stranded on a manual queue either: unwind this Match to CANCELLED
+    // (CAS-guarded, so it can only ever happen once) and automatically
+    // re-search for the next candidate — the system must self-heal here,
+    // not wait on a human.
+    await db.match.updateMany({
+      where: { id: matchId, status: "CONFIRMED" },
+      data: { status: "CANCELLED", declineReason: formatCancelReason(CANCEL_REASON.SEAT_UNAVAILABLE) },
     });
     await logAction({
       actorType: "AGENT",
@@ -306,6 +353,13 @@ export async function handlePassengerResponse(matchId: string, accepted: boolean
       entityId: matchId,
       details: { offerId: match.driverOfferId, requestedSeats: request.seats },
     });
+
+    await db.tripRequest.update({ where: { id: match.tripRequestId }, data: { status: "PENDING" } });
+    const nextMatch = await proposeMatchesForRequest(match.tripRequestId);
+    if (!nextMatch) {
+      const passengerLang = (request.passenger.preferredLang ?? "RU") as Lang;
+      await notifyPassengerText(request.passenger.whatsappId, messages.noCandidatesYet[passengerLang]);
+    }
     return db.match.findUniqueOrThrow({ where: { id: matchId } });
   }
 
@@ -501,6 +555,11 @@ export async function setDriverReportedSeatsAvailable(offerId: string, reportedS
       entityId: offerId,
       details: { reportedSeats, boundedSeatsAvailable: bounded },
     });
+    // Spec s.7G: a driver-reported seat drop must proactively re-check any
+    // pending negotiation already promised more seats than now exist —
+    // never silently let a stale hold ride through to a confirm that would
+    // just fail the seat-decrement CAS anyway, with no explanation given.
+    await invalidateMatchesExceedingSeats(offerId, bounded);
   }
   return { offerId, seatsAvailable: bounded, updated: result.count > 0 };
 }
@@ -536,4 +595,225 @@ export async function markTripCompletedByDriverReport(
   });
   const returnOffer = await runTripCompletionSideEffects(trip, payment);
   return { returnOffer, alreadyCompleted: false };
+}
+
+// --- Cancellation, breakdown reaction, and rematch (spec s.7/s.11) -------
+// Every function below is, like the rest of this file, the exclusive
+// Trip/Match/DriverOffer mutation surface: RT Command (agents/command.ts)
+// and RT OFFICE's telemetry.ts are the only callers, never a raw db.trip/
+// db.match write from those layers. Every transition is CAS-guarded
+// (updateMany against the expected prior status) so repeated delivery of a
+// CANCEL, a redelivered BREAKDOWN, or a stale seat-count report is always a
+// safe no-op rather than a double seat release or a duplicate rematch.
+
+type CancelActor = "PASSENGER" | "DRIVER" | "SYSTEM";
+
+/** Cancels the one active Match (if any) still negotiating for this
+ * TripRequest — i.e. a demand still in DRIVER_OFFERED/SEAT_HELD, before any
+ * Trip exists. No seat was ever decremented at this stage (seatsAvailable is
+ * only touched at passenger CONFIRM), so "releasing" it here just means
+ * freeing the offer's exclusivity lock (see offerIdsWithActiveMatch) so
+ * other passengers become matchable against it again. When `rematch` is
+ * true, the passenger's own demand is put back up for a fresh search
+ * instead of being left dangling (used by breakdown/seat-drop reactions;
+ * a plain passenger self-cancel never rematches its own now-cancelled
+ * demand). Returns whether it actually cancelled a Match (false if there was
+ * none, or if it lost a race to a real driver/passenger response). */
+export async function cancelActiveMatchForTripRequest(
+  tripRequestId: string,
+  reasonCode: CancelReasonCode,
+  opts: { rematch: boolean },
+): Promise<boolean> {
+  const activeMatch = await db.match.findFirst({
+    where: { tripRequestId, status: { in: [...ACTIVE_MATCH_STATUSES] } },
+    include: { driverOffer: { include: { driver: true } }, tripRequest: { include: { passenger: true } } },
+  });
+  if (!activeMatch) return false;
+
+  const claim = await db.match.updateMany({
+    where: { id: activeMatch.id, status: activeMatch.status as ActiveMatchStatus },
+    data: { status: "CANCELLED", declineReason: formatCancelReason(reasonCode) },
+  });
+  if (claim.count === 0) return false; // raced with a real driver/passenger response — leave it alone
+
+  await logAction({
+    actorType: reasonCode === CANCEL_REASON.BREAKDOWN ? "SYSTEM" : "AGENT",
+    action: "match.cancelled",
+    entityType: "Match",
+    entityId: activeMatch.id,
+    details: { reasonCode, tripRequestId },
+  });
+
+  const driverLang = (activeMatch.driverOffer.driver.preferredLang ?? "RU") as Lang;
+  await notifyDriverPrivately(activeMatch.driverOffer.driver.telegramUserId, messages.pendingMatchCancelledForDriver[driverLang]);
+
+  if (opts.rematch) {
+    const passengerLang = (activeMatch.tripRequest.passenger.preferredLang ?? "RU") as Lang;
+    const noticeKey = reasonCode === CANCEL_REASON.BREAKDOWN ? "driverBreakdownForPassenger" : "seatNoLongerAvailableForPassenger";
+    await notifyPassengerText(activeMatch.tripRequest.passenger.whatsappId, messages[noticeKey][passengerLang]);
+    await db.tripRequest.update({ where: { id: tripRequestId }, data: { status: "PENDING" } });
+    const nextMatch = await proposeMatchesForRequest(tripRequestId);
+    if (!nextMatch) await notifyPassengerText(activeMatch.tripRequest.passenger.whatsappId, messages.noCandidatesYet[passengerLang]);
+  }
+  return true;
+}
+
+/** Passenger-initiated cancellation of their own demand before any Trip
+ * exists (still SEARCHING/DRIVER_OFFERED/SEAT_HELD). Idempotent: a repeat
+ * call against an already-CANCELLED/terminal TripRequest is a no-op. */
+export async function cancelPendingDemand(tripRequestId: string) {
+  await cancelActiveMatchForTripRequest(tripRequestId, CANCEL_REASON.PASSENGER_CANCELLED, { rematch: false });
+
+  const claim = await db.tripRequest.updateMany({
+    where: { id: tripRequestId, status: { in: ["PENDING", "MATCHING", "MATCHED"] } },
+    data: { status: "CANCELLED" },
+  });
+  if (claim.count > 0) {
+    await logAction({
+      actorType: "AGENT",
+      actorId: "PASSENGER",
+      action: "trip_request.cancelled",
+      entityType: "TripRequest",
+      entityId: tripRequestId,
+      details: { reasonCode: CANCEL_REASON.PASSENGER_CANCELLED },
+    });
+  }
+  return { tripRequestId, cancelled: claim.count > 0 };
+}
+
+/** Cancels an already-BOOKED Trip (SCHEDULED/IN_PROGRESS -> CANCELLED),
+ * atomically releasing its held seat(s) back to the DriverOffer pool and, for
+ * a driver-caused cancellation, automatically re-searching a new driver for
+ * the stranded passenger (spec s.7D: "BOOKED -> DRIVER_UNAVAILABLE ->
+ * rematch process"). A passenger-caused cancellation only releases the seat
+ * and notifies the driver — the passenger's own demand is not resurrected.
+ * CAS-guarded: a duplicate/redelivered cancel against an already-terminal
+ * Trip is a safe no-op, never a second seat release. */
+export async function cancelTrip(tripId: string, actor: CancelActor, reasonCode: CancelReasonCode, detail?: string) {
+  const now = new Date();
+  const claim = await db.trip.updateMany({
+    where: { id: tripId, status: { in: ["SCHEDULED", "IN_PROGRESS"] } },
+    data: { status: "CANCELLED", cancelledAt: now, cancelReason: formatCancelReason(reasonCode, detail) },
+  });
+  if (claim.count === 0) return { tripId, cancelled: false };
+
+  const trip = await db.trip.findUniqueOrThrow({
+    where: { id: tripId },
+    include: { driver: true, passenger: true, driverOffer: true },
+  });
+
+  // Release exactly the seats this trip snapshot reserved, clamped to
+  // capacity — never trusts a runaway increment past seatsTotal even if
+  // reservations were somehow double-counted elsewhere.
+  const releasedOffer = await db.driverOffer.update({
+    where: { id: trip.driverOfferId },
+    data: { seatsAvailable: { increment: trip.seats } },
+  });
+  const boundedSeats = Math.min(releasedOffer.seatsAvailable, releasedOffer.seatsTotal);
+  if (boundedSeats !== releasedOffer.seatsAvailable || releasedOffer.status === "FULL" || releasedOffer.status === "CLOSED") {
+    await db.driverOffer.update({
+      where: { id: releasedOffer.id },
+      data: { seatsAvailable: boundedSeats, status: boundedSeats === 0 ? "FULL" : "PARTIALLY_FILLED" },
+    });
+  }
+
+  await logAction({
+    actorType: actor === "SYSTEM" ? "SYSTEM" : "AGENT",
+    actorId: actor === "PASSENGER" ? "PASSENGER" : actor === "DRIVER" ? "DRIVER" : "MATCHING",
+    action: "trip.cancelled",
+    entityType: "Trip",
+    entityId: tripId,
+    details: { reasonCode, detail, releasedSeats: trip.seats, offerId: trip.driverOfferId },
+  });
+
+  // Match.status also needs to reflect the cancellation for booking-state
+  // derivation and audit — the Trip row above is the authoritative write,
+  // this is a best-effort consistency update, never re-checked.
+  await db.match.updateMany({
+    where: { id: trip.matchId, status: "CONFIRMED" },
+    data: { status: "CANCELLED", declineReason: formatCancelReason(reasonCode, detail) },
+  });
+
+  const driverLang = (trip.driver.preferredLang ?? "RU") as Lang;
+  const passengerLang = (trip.passenger.preferredLang ?? "RU") as Lang;
+
+  if (actor === "PASSENGER") {
+    await notifyDriverPrivately(trip.driver.telegramUserId, messages.tripCancelledByPassengerForDriver[driverLang]);
+    return { tripId, cancelled: true };
+  }
+
+  // DRIVER or SYSTEM(breakdown)-caused: the passenger did nothing wrong and
+  // still wants to travel — put their demand back up for a fresh search
+  // instead of leaving them stranded on a cancelled booking.
+  const noticeKey = reasonCode === CANCEL_REASON.BREAKDOWN ? "driverBreakdownForPassenger" : "tripCancelledByDriverForPassenger";
+  await notifyPassengerText(trip.passenger.whatsappId, messages[noticeKey][passengerLang]);
+
+  const tripRequestId = (await db.match.findUniqueOrThrow({ where: { id: trip.matchId } })).tripRequestId;
+  await db.tripRequest.update({ where: { id: tripRequestId }, data: { status: "PENDING" } });
+  const nextMatch = await proposeMatchesForRequest(tripRequestId);
+  if (!nextMatch) await notifyPassengerText(trip.passenger.whatsappId, messages.noCandidatesYet[passengerLang]);
+
+  return { tripId, cancelled: true };
+}
+
+/** Reacts to a verified driver breakdown (CRM Auto's own OPEN
+ * BREAKDOWN_INCIDENT — see rt-office/telemetry.ts's BREAKDOWN_OPENED case,
+ * the only caller) by cancelling every currently active booking for that
+ * driver: any BOOKED/IN_TRIP Trip, and any still-negotiating Match. CRM Auto
+ * itself never touches Trip/Match (its own write boundary, see
+ * crm-auto/orchestrator.ts's contract) — this is the one place that
+ * translates a verified operational fact into the real booking-lifecycle
+ * reaction the spec requires (s.7F), keeping CRM Auto's append-only role
+ * intact. */
+export async function handleDriverBreakdown(driverId: string) {
+  const activeTrips = await db.trip.findMany({
+    where: { driverId, status: { in: ["SCHEDULED", "IN_PROGRESS"] } },
+  });
+  for (const trip of activeTrips) {
+    await cancelTrip(trip.id, "SYSTEM", CANCEL_REASON.BREAKDOWN);
+  }
+
+  const activeMatches = await db.match.findMany({
+    where: { status: { in: [...ACTIVE_MATCH_STATUSES] }, driverOffer: { driverId } },
+    select: { tripRequestId: true },
+  });
+  let cancelledMatches = 0;
+  for (const match of activeMatches) {
+    const won = await cancelActiveMatchForTripRequest(match.tripRequestId, CANCEL_REASON.BREAKDOWN, { rematch: true });
+    if (won) {
+      cancelledMatches++;
+      continue;
+    }
+    // Spec s.14 Test 7 — "BREAKDOWN almost simultaneous with seat hold": this
+    // match was still negotiating in the snapshot above, but lost the CAS
+    // race to a passenger CONFIRM that landed a moment later, turning it into
+    // a real Trip too recently for the activeTrips snapshot at the top of
+    // this function to have seen it. Never leave that Trip silently active
+    // against a driver already known to have broken down.
+    const raceTrip = await db.trip.findFirst({
+      where: { driverId, match: { tripRequestId: match.tripRequestId }, status: { in: ["SCHEDULED", "IN_PROGRESS"] } },
+    });
+    if (raceTrip) {
+      await cancelTrip(raceTrip.id, "SYSTEM", CANCEL_REASON.BREAKDOWN);
+    }
+  }
+
+  return { cancelledTrips: activeTrips.length, cancelledMatches };
+}
+
+/** Spec s.7G: a driver-reported seat-count drop must proactively invalidate
+ * any pending Match already promising more seats than now remain, rather
+ * than silently letting it ride to a confirm that would just fail the
+ * seat-decrement CAS with no explanation. Only ever called after
+ * setDriverReportedSeatsAvailable's own update already succeeded. */
+async function invalidateMatchesExceedingSeats(offerId: string, newSeatsAvailable: number) {
+  const activeMatches = await db.match.findMany({
+    where: { driverOfferId: offerId, status: { in: [...ACTIVE_MATCH_STATUSES] } },
+    include: { tripRequest: true },
+  });
+  for (const match of activeMatches) {
+    if (match.tripRequest.seats > newSeatsAvailable) {
+      await cancelActiveMatchForTripRequest(match.tripRequestId, CANCEL_REASON.SEAT_UNAVAILABLE, { rematch: true });
+    }
+  }
 }

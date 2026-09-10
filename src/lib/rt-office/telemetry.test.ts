@@ -18,6 +18,7 @@ const { dbMocks, crmAutoMocks, matchingMocks, jolchuMocks, traceMocks } = vi.hoi
     markTripDeparted: vi.fn(),
     setDriverReportedSeatsAvailable: vi.fn(),
     markTripCompletedByDriverReport: vi.fn(),
+    handleDriverBreakdown: vi.fn().mockResolvedValue({ cancelledTrips: 0, cancelledMatches: 0 }),
   },
   jolchuMocks: {
     resolveRouteIntelligence: vi.fn(),

@@ -30,6 +30,18 @@ const FORBIDDEN_IMPORTS: Record<string, string[]> = {
   // closeCase are still off-limits: those belong to Adilet's own
   // investigation workflow, not to Mira's one-shot intake.
   "@/lib/adilet/case": ["attachEvidence", "moveCaseToUnderReview", "closeCase"],
+  // RT booking-lifecycle spec s.15 invariant #5 — Mira is RT's outbound
+  // messaging voice (src/lib/mira/outbound.ts), never a second writer into
+  // the Driver CRM. Every operational fact (breakdown, exception, seat
+  // report) must go through CRM Auto's own recording entrypoints
+  // (crm-auto/orchestrator.ts), which MATCH/RT OFFICE call directly — Mira
+  // must never call them herself.
+  "@/lib/crm-auto/orchestrator": [
+    "recordOperationalEvent",
+    "recordExceptionalCorrection",
+    "openBreakdownIncident",
+    "resolveBreakdownIncident",
+  ],
 };
 
 // Any named import at all from an "Akjol" module is forbidden for Mira —

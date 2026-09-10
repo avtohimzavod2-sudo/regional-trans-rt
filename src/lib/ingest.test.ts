@@ -1,4 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { Prisma } from "@prisma/client";
+
+function p2002Error() {
+  return new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
+    code: "P2002",
+    clientVersion: "test",
+  });
+}
 
 // Spec s.7 — REMOVE THE PILOT-ONLY INGEST ASSUMPTION: ingest.ts must no
 // longer hardcode a single "bishkek-karakol" corridor. It should read every
@@ -17,8 +25,8 @@ const dbMocks = {
   stop: { findFirst: vi.fn() },
   passenger: { upsert: vi.fn() },
   driver: { upsert: vi.fn(), update: vi.fn() },
-  tripRequest: { create: vi.fn() },
-  driverOffer: { create: vi.fn() },
+  tripRequest: { create: vi.fn(), findUniqueOrThrow: vi.fn() },
+  driverOffer: { create: vi.fn(), findUniqueOrThrow: vi.fn() },
   rawMessage: { create: vi.fn() },
 };
 vi.mock("@/lib/db", () => ({ db: dbMocks }));
@@ -203,6 +211,52 @@ describe("ingestPassengerMessage — RT OFFICE demand-side wiring (spec s.8)", (
   });
 });
 
+// Spec s.9/s.14 Test 19 — a redelivered inbound message (same rawMessageId,
+// e.g. a webhook retry) must never create a second TripRequest/DriverOffer.
+// TripRequest.rawMessageId / DriverOffer.rawMessageId now carry a real
+// DB-level unique constraint; ingest.ts must catch the resulting P2002 and
+// return the original row instead of letting the error propagate.
+describe("ingestPassengerMessage — Test 19: duplicate demand does not create a second order", () => {
+  it("returns the existing TripRequest instead of creating a duplicate when the same rawMessageId is redelivered", async () => {
+    extractTripMessageMock.mockResolvedValue({
+      result: { ...BASE_EXTRACTION, kind: "PASSENGER_REQUEST", originStopKey: "c:a", destinationStopKey: "c:b" },
+      origin: { key: "c:a", nameRu: "A", nameKy: "A", nameEn: "A", aliases: [] },
+      destination: { key: "c:b", nameRu: "B", nameKy: "B", nameEn: "B", aliases: [] },
+    });
+    dbMocks.stop.findFirst.mockResolvedValue({ id: "stop_x" });
+    dbMocks.tripRequest.create.mockRejectedValue(p2002Error());
+    dbMocks.tripRequest.findUniqueOrThrow.mockResolvedValue({
+      id: "req_existing",
+      origin: { nameRu: "A", nameKy: "A", nameEn: "A" },
+      destination: { nameRu: "B", nameKy: "B", nameEn: "B" },
+    });
+
+    const request = await ingestPassengerMessage("+996700000001", "text", "wamid.same-message");
+
+    expect(dbMocks.tripRequest.findUniqueOrThrow).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { rawMessageId: "wamid.same-message" } }),
+    );
+    expect(request).toEqual(expect.objectContaining({ id: "req_existing" }));
+    expect(logActionMock).toHaveBeenCalledWith(expect.objectContaining({ action: "request.duplicate_ignored", entityId: "req_existing" }));
+    // No second side effect from the duplicate: no re-send, no re-match, no RT OFFICE re-dispatch.
+    expect(sendWhatsAppTextMock).not.toHaveBeenCalled();
+    expect(proposeMatchesForRequestMock).not.toHaveBeenCalled();
+    expect(resolveSupplyForDispatcherMock).not.toHaveBeenCalled();
+  });
+
+  it("propagates a non-duplicate DB error (not silently swallowed as a dedup)", async () => {
+    extractTripMessageMock.mockResolvedValue({
+      result: { ...BASE_EXTRACTION, kind: "PASSENGER_REQUEST", originStopKey: "c:a", destinationStopKey: "c:b" },
+      origin: { key: "c:a", nameRu: "A", nameKy: "A", nameEn: "A", aliases: [] },
+      destination: { key: "c:b", nameRu: "B", nameKy: "B", nameEn: "B", aliases: [] },
+    });
+    dbMocks.stop.findFirst.mockResolvedValue({ id: "stop_x" });
+    dbMocks.tripRequest.create.mockRejectedValue(new Error("connection reset"));
+
+    await expect(ingestPassengerMessage("+996700000001", "text", "wamid.other")).rejects.toThrow("connection reset");
+  });
+});
+
 describe("ingestDriverPrivateMessage — RT OFFICE supply-side wiring (spec s.8)", () => {
   function mockDriverOfferFlow(driverStatus: string) {
     dbMocks.driver.upsert.mockResolvedValue({ id: "driver_1", status: driverStatus, carModel: "Camry" });
@@ -234,6 +288,34 @@ describe("ingestDriverPrivateMessage — RT OFFICE supply-side wiring (spec s.8)
 
     await ingestDriverPrivateMessage("tg_1", "user1", "text");
 
+    expect(notifySupplyAvailableMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("ingestDriverPrivateMessage — Test 19: duplicate offer does not create a second order", () => {
+  it("returns the existing DriverOffer instead of creating a duplicate when the same rawMessageId is redelivered", async () => {
+    dbMocks.driver.upsert.mockResolvedValue({ id: "driver_1", status: "ACTIVE", carModel: "Camry" });
+    extractTripMessageMock.mockResolvedValue({
+      result: { ...BASE_EXTRACTION, kind: "DRIVER_OFFER", originStopKey: "c:a", destinationStopKey: "c:b" },
+      origin: { key: "c:a", nameRu: "A", nameKy: "A", nameEn: "A", aliases: [] },
+      destination: { key: "c:b", nameRu: "B", nameKy: "B", nameEn: "B", aliases: [] },
+    });
+    dbMocks.stop.findFirst.mockResolvedValue({ id: "stop_x" });
+    dbMocks.driverOffer.create.mockRejectedValue(p2002Error());
+    dbMocks.driverOffer.findUniqueOrThrow.mockResolvedValue({
+      id: "offer_existing",
+      seatsAvailable: 3,
+      origin: { nameRu: "A", nameKy: "A", nameEn: "A" },
+      destination: { nameRu: "B", nameKy: "B", nameEn: "B" },
+    });
+
+    const offer = await ingestDriverPrivateMessage("tg_1", "user1", "text", "tgmsg.same-message");
+
+    expect(dbMocks.driverOffer.findUniqueOrThrow).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { rawMessageId: "tgmsg.same-message" } }),
+    );
+    expect(offer).toEqual(expect.objectContaining({ id: "offer_existing" }));
+    expect(logActionMock).toHaveBeenCalledWith(expect.objectContaining({ action: "offer.duplicate_ignored", entityId: "offer_existing" }));
     expect(notifySupplyAvailableMock).not.toHaveBeenCalled();
   });
 });

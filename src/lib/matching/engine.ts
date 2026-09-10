@@ -1,6 +1,21 @@
-import type { MatchableOffer, MatchableRequest, ScoredOffer, ScoredRequest } from "./types";
+import type { DriverCategory, MatchableOffer, MatchableRequest, ScoredOffer, ScoredRequest } from "./types";
 
 const MAX_TIME_GAP_MINUTES = 180; // beyond this, time mismatch is not proposed automatically
+
+// Spec s.3: "Registered RT drivers get priority over external/unregistered
+// candidates, but never at the expense of safety/route/seats/arrival time."
+// Kept deliberately small next to segmentScore/timeScore/fairnessScore
+// (each worth up to 6-10 points) so it only ever breaks near-ties between
+// otherwise comparable offers — it can never make a worse route/time fit
+// win over a better one, since isEligibleOffer/the hard filters in
+// findCandidateOffers already run first and are untouched by this bonus.
+const DRIVER_CATEGORY_PRIORITY_BONUS: Record<DriverCategory, number> = {
+  ANCHOR: 3,
+  DISPATCHER_FLEET: 2.5,
+  REGULAR: 1.5,
+  OCCASIONAL: 0.5,
+  UNKNOWN: 0,
+};
 
 function toMinutes(hhmm: string | null): number | null {
   if (!hhmm) return null;
@@ -88,7 +103,9 @@ function scorePair(offer: MatchableOffer, request: MatchableRequest, now: Date):
 
   const segmentScore = Math.max(0, 8 - overhang * 2);
 
-  return segmentScore + timeScore + fairnessScore;
+  const priorityScore = DRIVER_CATEGORY_PRIORITY_BONUS[offer.driverCategory] ?? 0;
+
+  return segmentScore + timeScore + fairnessScore + priorityScore;
 }
 
 export interface FindCandidatesOptions {

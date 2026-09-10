@@ -106,6 +106,36 @@ export const messages = {
     KY: "Арызды таанып билүү мүмкүн болгон жок. Сураныч, кайдан, кайда, күнүн, убактысын, орун санын жазыңыз.",
     EN: "We couldn't parse that as a trip request. Please specify: origin, destination, date, time, and number of seats.",
   },
+  tripCancelledByPassengerForDriver: {
+    RU: "Пассажир отменил поездку. Место снова свободно.",
+    KY: "Жүргүнчү сапарды жокко чыгарды. Орун кайра бош.",
+    EN: "The passenger cancelled the trip. The seat is free again.",
+  },
+  tripCancelledByDriverForPassenger: {
+    RU: "К сожалению, водитель отменил поездку. Ищем для вас другой вариант.",
+    KY: "Тилекке каршы, айдоочу сапарды жокко чыгарды. Сизге башка вариант издеп жатабыз.",
+    EN: "Unfortunately, the driver cancelled the trip. We're looking for another option for you.",
+  },
+  driverBreakdownForPassenger: {
+    RU: "У водителя техническая неисправность, поездка не может состояться. Ищем для вас другой вариант.",
+    KY: "Айдоочуда техникалык бузулуу болду, сапар өтпөй калды. Сизге башка вариант издеп жатабыз.",
+    EN: "The driver reported a breakdown, so this trip can't go ahead. We're looking for another option for you.",
+  },
+  seatNoLongerAvailableForPassenger: {
+    RU: "Водитель уменьшил количество свободных мест, и вашего места больше нет. Ищем для вас другой вариант.",
+    KY: "Айдоочу бош орундардын санын азайтты, сиздин орунуңуз калган жок. Сизге башка вариант издеп жатабыз.",
+    EN: "The driver reduced their free seats and your seat is no longer available. We're looking for another option for you.",
+  },
+  pendingMatchCancelledForDriver: {
+    RU: "Пассажир отменил заявку до подтверждения. Ищем вам другого пассажира.",
+    KY: "Жүргүнчү ырастоого чейин арызын жокко чыгарды. Сизге башка жүргүнчү издеп жатабыз.",
+    EN: "The passenger cancelled the request before confirming. We're looking for another passenger for you.",
+  },
+  demandCancelledConfirmation: {
+    RU: "Хорошо, отменили ваш поиск поездки.",
+    KY: "Макул, сапар издөөңүздү жокко чыгардык.",
+    EN: "Okay, we've cancelled your trip search.",
+  },
   groupDmInvite: {
     RU: "Здравствуйте! Мы увидели ваше объявление в группе. Чтобы безопасно и без спама подобрать поездку, напишите нам, пожалуйста, напрямую сюда, в этот чат.",
     KY: "Саламатсызбы! Топтогу жарыяңызды көрдүк. Коопсуз жана спамсыз сапар табуу үчүн бул жерге, ушул чатка түздөн-түз жазып коюңузчу.",

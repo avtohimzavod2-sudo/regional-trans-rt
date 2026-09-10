@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { logAction } from "@/lib/audit";
 import { extractTripMessage, type StopContext } from "@/lib/nlp/extract";
@@ -105,22 +106,51 @@ export async function ingestPassengerMessage(whatsappId: string, text: string, r
     return null;
   }
 
-  const request = await db.tripRequest.create({
-    data: {
-      passengerId: passenger.id,
-      originStopId,
-      destinationStopId,
-      travelDate,
-      timeWindowStart: result.timeWindowStart,
-      timeWindowEnd: result.timeWindowEnd,
-      seats: result.seats,
-      luggage: result.luggage,
-      pickupPoint: result.pickupPoint,
-      sourceChannel: "WHATSAPP",
-      rawMessageId,
-    },
-    include: { origin: true, destination: true },
-  });
+  let request;
+  let isDuplicate = false;
+  try {
+    request = await db.tripRequest.create({
+      data: {
+        passengerId: passenger.id,
+        originStopId,
+        destinationStopId,
+        travelDate,
+        timeWindowStart: result.timeWindowStart,
+        timeWindowEnd: result.timeWindowEnd,
+        seats: result.seats,
+        luggage: result.luggage,
+        pickupPoint: result.pickupPoint,
+        sourceChannel: "WHATSAPP",
+        rawMessageId,
+      },
+      include: { origin: true, destination: true },
+    });
+  } catch (err) {
+    // Spec s.9 — demand creation must be idempotent: a redelivered inbound
+    // message (same rawMessageId) must never create a second TripRequest.
+    // TripRequest.rawMessageId carries a real DB-level unique constraint, so
+    // this is safe under concurrent redelivery (not a check-then-write race).
+    if (rawMessageId && err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      request = await db.tripRequest.findUniqueOrThrow({
+        where: { rawMessageId },
+        include: { origin: true, destination: true },
+      });
+      isDuplicate = true;
+    } else {
+      throw err;
+    }
+  }
+
+  if (isDuplicate) {
+    await logAction({
+      actorType: "AGENT",
+      action: "request.duplicate_ignored",
+      entityType: "TripRequest",
+      entityId: request.id,
+      details: { rawMessageId },
+    });
+    return request;
+  }
 
   await logAction({
     actorType: "AGENT",
@@ -200,21 +230,50 @@ export async function ingestDriverPrivateMessage(
     await db.driver.update({ where: { id: driver.id }, data: { carModel: result.carInfo } });
   }
 
-  const offer = await db.driverOffer.create({
-    data: {
-      driverId: driver.id,
-      originStopId,
-      destinationStopId,
-      travelDate,
-      timeWindowStart: result.timeWindowStart,
-      timeWindowEnd: result.timeWindowEnd,
-      seatsTotal: result.seats,
-      seatsAvailable: result.seats,
-      sourceChannel: "TELEGRAM_BOT",
-      rawMessageId,
-    },
-    include: { origin: true, destination: true },
-  });
+  let offer;
+  let isDuplicateOffer = false;
+  try {
+    offer = await db.driverOffer.create({
+      data: {
+        driverId: driver.id,
+        originStopId,
+        destinationStopId,
+        travelDate,
+        timeWindowStart: result.timeWindowStart,
+        timeWindowEnd: result.timeWindowEnd,
+        seatsTotal: result.seats,
+        seatsAvailable: result.seats,
+        sourceChannel: "TELEGRAM_BOT",
+        rawMessageId,
+      },
+      include: { origin: true, destination: true },
+    });
+  } catch (err) {
+    // Spec s.9 — driver offer creation must be idempotent: a redelivered
+    // inbound message (same rawMessageId) must never create a second
+    // DriverOffer. DriverOffer.rawMessageId carries a real DB-level unique
+    // constraint, so this is safe under concurrent redelivery.
+    if (rawMessageId && err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      offer = await db.driverOffer.findUniqueOrThrow({
+        where: { rawMessageId },
+        include: { origin: true, destination: true },
+      });
+      isDuplicateOffer = true;
+    } else {
+      throw err;
+    }
+  }
+
+  if (isDuplicateOffer) {
+    await logAction({
+      actorType: "AGENT",
+      action: "offer.duplicate_ignored",
+      entityType: "DriverOffer",
+      entityId: offer.id,
+      details: { rawMessageId },
+    });
+    return offer;
+  }
 
   await logAction({
     actorType: "AGENT",

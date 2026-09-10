@@ -13,6 +13,10 @@ import { handleDriverMessage } from "./driver";
 import { openSupportCase } from "./support";
 import { logAgentAction, rootContext } from "./trace";
 import { nextHop, type AgentContext, type AgentContract } from "./types";
+import { cancelTrip, cancelPendingDemand, cancelActiveMatchForTripRequest } from "@/lib/matching/orchestrate";
+import { CANCEL_REASON } from "@/lib/matching/booking-state";
+import { notifyPassengerText } from "@/lib/mira/outbound";
+import { messages, type Lang } from "@/lib/i18n/messages";
 
 export const COMMAND_AGENT_CONTRACT: AgentContract = {
   name: "COMMAND",
@@ -73,23 +77,78 @@ export interface CommandResult {
   data?: unknown;
 }
 
+const ACTIVE_NEGOTIATION_MATCH_STATUSES = ["PROPOSED_TO_DRIVER", "AWAITING_DRIVER", "AWAITING_PASSENGER"] as const;
+const ACTIVE_TRIP_STATUSES = ["SCHEDULED", "IN_PROGRESS"] as const;
+
+/** Cancellation can arrive at any point in the lifecycle — before a Trip
+ * even exists (still SEARCHING/DRIVER_OFFERED/SEAT_HELD) or after it's
+ * BOOKED. Whichever stage it's at, the real state transition + seat
+ * release + rematch is delegated to matching/orchestrate.ts (the sole
+ * Trip/Match/DriverOffer write surface, spec s.11) — this function only
+ * finds the right target and opens the SupportCase audit trail for the
+ * post-Trip case. Returns null (falls through to normal ingestion) if the
+ * sender has nothing active to cancel, or if the cancellation lost a race
+ * to some other concurrent transition. */
 async function tryOpenCancellationCase(ctx: AgentContext, msg: InboundMessage) {
   if (msg.channel === "TELEGRAM_GROUP") return null;
 
-  const trip =
-    msg.channel === "WHATSAPP"
-      ? await db.trip.findFirst({ where: { status: "SCHEDULED", passenger: { whatsappId: msg.senderId } }, orderBy: { createdAt: "desc" } })
-      : await db.trip.findFirst({ where: { status: "SCHEDULED", driver: { telegramUserId: msg.senderId } }, orderBy: { createdAt: "desc" } });
+  if (msg.channel === "WHATSAPP") {
+    const trip = await db.trip.findFirst({
+      where: { status: { in: [...ACTIVE_TRIP_STATUSES] }, passenger: { whatsappId: msg.senderId } },
+      orderBy: { createdAt: "desc" },
+    });
+    if (trip) {
+      const result = await cancelTrip(trip.id, "PASSENGER", CANCEL_REASON.PASSENGER_CANCELLED, msg.text);
+      if (!result.cancelled) return null;
+      return openSupportCase(ctx, {
+        tripId: trip.id,
+        caseType: "CANCELLATION",
+        openedByType: "AGENT",
+        openedById: "COMMAND",
+        description: msg.text,
+        skipTripStatusUpdate: true,
+      });
+    }
 
-  if (!trip) return null;
+    const pendingRequest = await db.tripRequest.findFirst({
+      where: { status: { in: ["PENDING", "MATCHING", "MATCHED"] }, passenger: { whatsappId: msg.senderId } },
+      orderBy: { createdAt: "desc" },
+      include: { passenger: true },
+    });
+    if (!pendingRequest) return null;
+    const result = await cancelPendingDemand(pendingRequest.id);
+    if (!result.cancelled) return null;
+    const lang = (pendingRequest.passenger.preferredLang ?? "RU") as Lang;
+    await notifyPassengerText(pendingRequest.passenger.whatsappId, messages.demandCancelledConfirmation[lang]);
+    return { id: pendingRequest.id, caseType: "CANCELLATION" as const, tripId: null as string | null };
+  }
 
-  return openSupportCase(ctx, {
-    tripId: trip.id,
-    caseType: "CANCELLATION",
-    openedByType: "AGENT",
-    openedById: "COMMAND",
-    description: msg.text,
+  // TELEGRAM_BOT: driver-initiated cancellation.
+  const trip = await db.trip.findFirst({
+    where: { status: { in: [...ACTIVE_TRIP_STATUSES] }, driver: { telegramUserId: msg.senderId } },
+    orderBy: { createdAt: "desc" },
   });
+  if (trip) {
+    const result = await cancelTrip(trip.id, "DRIVER", CANCEL_REASON.DRIVER_CANCELLED, msg.text);
+    if (!result.cancelled) return null;
+    return openSupportCase(ctx, {
+      tripId: trip.id,
+      caseType: "CANCELLATION",
+      openedByType: "AGENT",
+      openedById: "COMMAND",
+      description: msg.text,
+      skipTripStatusUpdate: true,
+    });
+  }
+
+  const pendingMatch = await db.match.findFirst({
+    where: { status: { in: [...ACTIVE_NEGOTIATION_MATCH_STATUSES] }, driverOffer: { driver: { telegramUserId: msg.senderId } } },
+    orderBy: { createdAt: "desc" },
+  });
+  if (!pendingMatch) return null;
+  const cancelled = await cancelActiveMatchForTripRequest(pendingMatch.tripRequestId, CANCEL_REASON.DRIVER_CANCELLED, { rematch: true });
+  if (!cancelled) return null;
+  return { id: pendingMatch.id, caseType: "CANCELLATION" as const, tripId: null as string | null };
 }
 
 async function dispatchIngest(ctx: AgentContext, kind: Exclude<RouteDecision["kind"], "ATTEMPT_CANCELLATION_THEN_INGEST">, msg: InboundMessage): Promise<CommandResult> {

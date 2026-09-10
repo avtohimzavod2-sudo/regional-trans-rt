@@ -52,3 +52,21 @@ describe("MATCH never messages a driver/passenger directly, bypassing Mira's out
     });
   }
 });
+
+// RT booking-lifecycle spec s.15 invariant #1 — "no second matching engine".
+// findCandidateOffers/findCandidateRequests (the pure scoring/filtering
+// logic) must be defined exactly once, in engine.ts. Everything else
+// (orchestrate.ts, RT OFFICE's read-only fleet/demand views) must call into
+// it rather than growing its own parallel candidate-ranking logic.
+describe("RT has exactly one matching engine — no source file besides engine.ts defines candidate scoring (spec s.15 invariant #1)", () => {
+  const SCORING_FUNCTION_NAMES = ["findCandidateOffers", "findCandidateRequests"];
+
+  it("defines findCandidateOffers/findCandidateRequests in engine.ts only", () => {
+    const definingFiles = matchingSourceFiles().filter((file) => {
+      const source = readFileSync(file, "utf8");
+      return SCORING_FUNCTION_NAMES.some((name) => new RegExp(`function\\s+${name}\\b`).test(source));
+    });
+
+    expect(definingFiles.map((f) => f.replace(MATCHING_DIR, "").replace(/^[/\\]/, ""))).toEqual(["engine.ts"]);
+  });
+});
