@@ -86,6 +86,21 @@ export const messages = {
     KY: "Азырынча ылайыктуу вариант жок. Пайда болушу менен дароо жазабыз.",
     EN: "No matching options yet. We'll message you as soon as one appears.",
   },
+  driverResponseTimedOut: {
+    RU: "Время на подтверждение этой заявки истекло, поэтому мы предложили её другому водителю.",
+    KY: "Бул арызды ырастоого берилген убакыт бүттү, андыктан аны башка айдоочуга сунуштадык.",
+    EN: "Your time to respond to this request has expired, so we've offered it to another driver.",
+  },
+  passengerResponseTimedOutForDriver: {
+    RU: "Пассажир не успел подтвердить поездку вовремя. Ищем для вас другого пассажира на этот рейс.",
+    KY: "Жүргүнчү сапарды өз убагында ырастай алган жок. Бул рейске башка жүргүнчү издеп жатабыз.",
+    EN: "The passenger didn't confirm in time. We're looking for another passenger for this trip.",
+  },
+  passengerResponseTimedOut: {
+    RU: "Время на подтверждение поездки истекло. Продолжаем искать вам подходящего водителя.",
+    KY: "Сапарды ырастоого берилген убакыт бүттү. Сизге ылайыктуу айдоочу издөөнү улантып жатабыз.",
+    EN: "Your time to confirm this trip has expired. We're continuing to look for a suitable driver for you.",
+  },
   unrecognized: {
     RU: "Не удалось распознать заявку. Укажите, пожалуйста: откуда, куда, дату, время, количество мест.",
     KY: "Арызды таанып билүү мүмкүн болгон жок. Сураныч, кайдан, кайда, күнүн, убактысын, орун санын жазыңыз.",

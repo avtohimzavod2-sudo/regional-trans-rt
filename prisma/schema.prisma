@@ -351,10 +351,17 @@ model Match {
   confirmedAt           DateTime?
   contactRevealedAt     DateTime?
   declineReason         String?
+  // Deadline for whichever side the ball is currently in: driver's response
+  // window while AWAITING_DRIVER, passenger's while AWAITING_PASSENGER. Null
+  // once the match leaves either waiting state. The expiry sweep
+  // (src/lib/matching/expiry.ts) is the only writer of the resulting EXPIRED
+  // status.
+  expiresAt             DateTime?
   createdAt             DateTime    @default(now())
   trip                  Trip?
 
   @@index([status])
+  @@index([status, expiresAt])
 }
 
 model Trip {

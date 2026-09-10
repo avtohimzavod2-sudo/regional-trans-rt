@@ -11,6 +11,7 @@ import { assertSafeToReveal } from "@/lib/agents/trust";
 import { chargeCommissionForTrip, CommissionAlreadyChargedError } from "@/lib/agents/pay";
 import { openSupportCase } from "@/lib/agents/support";
 import { latestOpenBreakdownForDriver, openBreakdownForDrivers } from "@/lib/crm-auto/bridge";
+import { getDriverResponseTimeoutMinutes, getPassengerResponseTimeoutMinutes } from "./config";
 
 const ACTIVE_MATCH_STATUSES = ["PROPOSED_TO_DRIVER", "AWAITING_DRIVER", "AWAITING_PASSENGER"] as const;
 
@@ -83,12 +84,14 @@ async function hasActiveMatch(where: { tripRequestId?: string; driverOfferId?: s
 }
 
 async function proposeToDriver(requestId: string, offerId: string) {
+  const now = new Date();
   const match = await db.match.create({
     data: {
       tripRequestId: requestId,
       driverOfferId: offerId,
       status: "AWAITING_DRIVER",
-      proposedToDriverAt: new Date(),
+      proposedToDriverAt: now,
+      expiresAt: new Date(now.getTime() + getDriverResponseTimeoutMinutes() * 60_000),
     },
   });
 
@@ -208,9 +211,15 @@ export async function handleDriverResponse(matchId: string, accepted: boolean) {
     return updated;
   }
 
+  const now = new Date();
   const updated = await db.match.update({
     where: { id: matchId },
-    data: { status: "AWAITING_PASSENGER", driverRespondedAt: new Date(), proposedToPassengerAt: new Date() },
+    data: {
+      status: "AWAITING_PASSENGER",
+      driverRespondedAt: now,
+      proposedToPassengerAt: now,
+      expiresAt: new Date(now.getTime() + getPassengerResponseTimeoutMinutes() * 60_000),
+    },
   });
 
   const lang = (match.tripRequest.passenger.preferredLang ?? "RU") as Lang;
