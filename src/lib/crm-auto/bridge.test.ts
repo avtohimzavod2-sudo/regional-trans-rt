@@ -4,12 +4,13 @@ const { dbMocks } = vi.hoisted(() => ({
   dbMocks: {
     driveCrmEvent: {
       findFirst: vi.fn(),
+      findMany: vi.fn(),
     },
   },
 }));
 vi.mock("@/lib/db", () => ({ db: dbMocks }));
 
-import { latestOpenBreakdownForDriver } from "./bridge";
+import { latestOpenBreakdownForDriver, latestVerifiedEtaForOffers } from "./bridge";
 
 describe("latestOpenBreakdownForDriver", () => {
   beforeEach(() => {
@@ -67,5 +68,54 @@ describe("latestOpenBreakdownForDriver", () => {
     const fact = await latestOpenBreakdownForDriver("d1");
 
     expect(fact).toEqual({ hasOpenBreakdown: true });
+  });
+});
+
+describe("latestVerifiedEtaForOffers", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns an empty map without querying when given no offer ids", async () => {
+    const result = await latestVerifiedEtaForOffers([]);
+
+    expect(result).toEqual(new Map());
+    expect(dbMocks.driveCrmEvent.findMany).not.toHaveBeenCalled();
+  });
+
+  it("reports null ETA facts for offers with no OPERATIONAL_ETA event, never fabricating a value", async () => {
+    dbMocks.driveCrmEvent.findMany.mockResolvedValue([]);
+
+    const result = await latestVerifiedEtaForOffers(["offer-1", "offer-2"]);
+
+    expect(result.get("offer-1")).toEqual({ etaMinutes: null, freshness: null, delayed: false, arrived: false });
+    expect(result.get("offer-2")).toEqual({ etaMinutes: null, freshness: null, delayed: false, arrived: false });
+  });
+
+  it("picks the most recent OPERATIONAL_ETA event per offer in a single query (one findMany regardless of offer count)", async () => {
+    const older = { offerId: "offer-1", etaMinutes: 40, source: "JOLCHU", createdAt: new Date("2026-09-09T10:00:00Z"), details: null };
+    const newer = { offerId: "offer-1", etaMinutes: 20, source: "JOLCHU", createdAt: new Date("2026-09-09T12:00:00Z"), details: { delayed: true } };
+    // Query is ordered by createdAt desc, so the mock returns newest-first.
+    dbMocks.driveCrmEvent.findMany.mockResolvedValue([newer, older]);
+
+    const result = await latestVerifiedEtaForOffers(["offer-1"]);
+
+    expect(dbMocks.driveCrmEvent.findMany).toHaveBeenCalledTimes(1);
+    expect(result.get("offer-1")).toEqual({
+      etaMinutes: 20,
+      freshness: { source: "JOLCHU", asOf: newer.createdAt.toISOString() },
+      delayed: true,
+      arrived: false,
+    });
+  });
+
+  it("deduplicates repeated offer ids before querying", async () => {
+    dbMocks.driveCrmEvent.findMany.mockResolvedValue([]);
+
+    await latestVerifiedEtaForOffers(["offer-1", "offer-1"]);
+
+    expect(dbMocks.driveCrmEvent.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ offerId: { in: ["offer-1"] } }) }),
+    );
   });
 });

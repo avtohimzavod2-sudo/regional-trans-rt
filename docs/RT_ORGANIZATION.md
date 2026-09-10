@@ -198,6 +198,63 @@ Both report to Artur with read-only visibility (`canRead` includes
 `director_*` or other manager-agent capability — see
 `docs/AGENT_CONSTITUTION.md` s.2 for the full exclusive-capability table.
 
+### 5.1 Live Fleet Picture — nationwide dispatcher read model
+
+`src/lib/rt-office/fleet-picture.ts`'s `buildLiveFleetPicture()` is RT
+OFFICE's aggregated, whole-network view for a human dispatcher — **not** a
+new persisted model and **not** a second matching/status engine. It is a
+computed read model (`DriverOperationalSnapshot[]` plus network-wide totals,
+`src/lib/rt-office/types.ts`) built fresh on every call from the same tables
+and the same `deriveOperationalState()` (`src/lib/rt-office/operational-state.ts`)
+that RT OFFICE's per-request `resolveDemandAgainstSupply` already uses, so a
+driver's state can never disagree between the two views.
+
+For each driver, exactly one "current operational context" is picked by a
+deterministic rule (`pickCurrentContext`, no LLM involved): a non-terminal
+Trip (`SCHEDULED`/`IN_PROGRESS`) outranks a merely-open `DriverOffer`, which
+in turn outranks falling back to the driver's most recent Trip of any
+status — the only way a just-arrived, just-completed, or just-cancelled
+driver stays visible as such until superseded by a new offer. A driver with
+neither ever falls through to `AVAILABLE`/`OFFLINE` from `Driver.status`
+alone.
+
+Every query is batched across the whole driver set — `Prisma`'s
+`distinct: ["driverId"]` + compound `orderBy` idiom for "latest row per
+driver" in one query, plus the existing `openBreakdownForDrivers` and the new
+`latestVerifiedEtaForOffers` (`src/lib/crm-auto/bridge.ts`, same "one bulk
+query, reduce in JS" shape) — so the query count stays constant regardless
+of fleet size, never one query per driver.
+
+Seat accounting follows `DriverOffer` as the sole source of truth:
+`seatsOccupied` is always `seatsTotal - seatsAvailable`, never a second
+stored counter, and the network-wide `seatsAvailableTotal`/
+`seatsOccupiedTotal` only sum drivers whose state represents real usable
+supply today (`AVAILABLE`/`PLANNED`/`WAITING_DEPARTURE`/`EN_ROUTE`/
+`DELAYED`) — a `BREAKDOWN`, `CANCELLED`, `OFFLINE`, `ARRIVED`, or `COMPLETED`
+driver's seats are historical, not capacity a dispatcher can sell right now.
+
+ETA is only ever the latest verified `DriveCrmEvent(OPERATIONAL_ETA)` fact
+for a driver's current offer — `null` when none exists, never computed or
+guessed by RT OFFICE/CRM Auto. `getEtaStalenessMinutes()`
+(`src/lib/crm-auto/config.ts`, default 30, `CRM_AUTO_ETA_STALENESS_MINUTES`
+override) only flags an old fact as stale in the dispatcher UI; it never
+replaces or discards the value itself.
+
+A real return-leg `DriverOffer` (`isReturnLeg: true`, created by the
+existing `buildReturnLegOfferInput`/`completeTrip`) is surfaced per-driver
+and counted in `returnLegOfferCount` — this is never conflated with CRM
+Auto's separate `BACKHAUL_OPPORTUNITY` signal, which is an operational
+observation, not a real offer.
+
+Two dispatcher screens consume this:
+
+- `/dispatcher/rt-office` — a "Живая линия RT" panel above the existing,
+  unmodified demand↔supply block.
+- `/dispatcher/drive-crm` — a "Сейчас" summary with per-vehicle rows and
+  quick filters by `operationalState` (server-side, via the page's
+  `searchParams`), above the existing, unmodified append-only
+  `DriveCrmEvent` journal table.
+
 ## 6. Market Acquisition Contractors — Driver / Passenger / Delivery
 
 Three LOW-criticality agents, all reporting to Artur, all read Market Gap

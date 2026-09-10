@@ -81,3 +81,89 @@ export interface SupplyAvailableOutcome {
   rematchTriggered: boolean;
   matchId: string | null;
 }
+
+export interface StopNameSummary {
+  id: string;
+  nameRu: string;
+  nameKy: string;
+  nameEn: string;
+}
+
+/** ETA freshness as shown to a dispatcher: the same verified fact as
+ * FactFreshness, plus whether it has crossed the configurable staleness
+ * threshold (crm-auto/config.ts's getEtaStalenessMinutes). `stale` is never
+ * used to discard or replace the ETA value — only to flag it. */
+export interface EtaFreshnessView extends FactFreshness {
+  stale: boolean;
+}
+
+/**
+ * One driver's current operational context, computed live from
+ * Driver/DriverOffer/Trip/DriveCrmEvent — never a new persisted table (spec
+ * s.2). Every field is either a live fact or an explicit null/zero; nothing
+ * here is guessed. `seatsOccupied` is always seatsTotal - seatsAvailable,
+ * never a second stored counter (spec s.10).
+ *
+ * When a driver has no current non-terminal trip and no open offer,
+ * `activeOfferId`/`activeTripId`/route/seat fields fall back to the
+ * driver's most recent terminal trip (COMPLETED/CANCELLED/NO_SHOW) if one
+ * exists — the only way ARRIVED/COMPLETED/CANCELLED are ever observable —
+ * or to all-null/zero if the driver has never had any offer or trip at all.
+ * See fleet-picture.ts's pickCurrentContext for the exact deterministic
+ * selection rule.
+ */
+export interface DriverOperationalSnapshot {
+  driverId: string;
+  driverName: string;
+  driverVerificationStatus: "PENDING_VERIFICATION" | "ACTIVE" | "SUSPENDED" | "BLOCKED";
+  vehicle: { carModel: string | null; carPlate: string | null };
+  operationalState: OperationalState;
+  activeOfferId: string | null;
+  activeTripId: string | null;
+  origin: StopNameSummary | null;
+  destination: StopNameSummary | null;
+  travelDate: string | null; // "YYYY-MM-DD"
+  departureWindow: DepartureWindow | null;
+  seatsTotal: number;
+  seatsAvailable: number;
+  /** Always seatsTotal - seatsAvailable, clamped at 0 — never a second
+   * mutable counter (spec s.10). */
+  seatsOccupied: number;
+  etaMinutes: number | null;
+  etaFreshness: EtaFreshnessView | null;
+  breakdownOpen: boolean;
+  isReturnLeg: boolean;
+  generatedFromTripId: string | null;
+  /** ISO timestamp shared by every snapshot in the same buildLiveFleetPicture
+   * call, so a dispatcher can tell all cards were computed from one
+   * consistent read. */
+  snapshotAsOf: string;
+}
+
+/** RT OFFICE's aggregated, nationwide read entrypoint (spec s.3). Built
+ * entirely from bulk/batched reads (spec s.4) — never one query per driver. */
+export interface LiveFleetPicture {
+  totalDrivers: number;
+  /** Every driver contributes to exactly one key here — never double
+   * counted (spec s.3). */
+  counts: Record<OperationalState, number>;
+  /** Sum of seatsAvailable/seatsOccupied across snapshots whose
+   * operationalState represents real, currently usable supply
+   * (AVAILABLE/PLANNED/WAITING_DEPARTURE/EN_ROUTE/DELAYED) — BREAKDOWN,
+   * CANCELLED, OFFLINE, ARRIVED, and COMPLETED never contribute (spec s.10). */
+  seatsAvailableTotal: number;
+  seatsOccupiedTotal: number;
+  /** Plain network-wide count of DriverOffer rows with status OPEN or
+   * PARTIALLY_FILLED — independent of which driver currently has that offer
+   * selected as their "current context" snapshot. */
+  activeDriverOfferCount: number;
+  /** Plain network-wide count of open/partially-filled DriverOffer rows with
+   * isReturnLeg = true (spec s.11) — a return DriverOffer, not CRM Auto's
+   * separate BACKHAUL_OPPORTUNITY signal (spec s.11 explicitly distinguishes
+   * the two; this counter never conflates them). */
+  returnLegOfferCount: number;
+  /** Count of snapshots with a non-null etaMinutes. */
+  confirmedEtaCount: number;
+  generatedAt: string;
+  drivers: DriverOperationalSnapshot[];
+}

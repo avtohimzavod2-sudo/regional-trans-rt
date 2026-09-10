@@ -105,6 +105,45 @@ export async function latestVerifiedEtaForOffer(driverId: string, offerId: strin
   };
 }
 
+/** Same fact as latestVerifiedEtaForOffer, batched across many offers in a
+ * single query instead of one findFirst per offer — for the RT OFFICE fleet
+ * picture, which needs this fact for potentially hundreds/thousands of
+ * offers at once and would otherwise run it in an N+1 loop. offerId already
+ * uniquely scopes each DriveCrmEvent (a given offer belongs to exactly one
+ * driver), so no driverId is needed to disambiguate. */
+export async function latestVerifiedEtaForOffers(offerIds: string[]): Promise<Map<string, VerifiedEtaFact>> {
+  const uniqueIds = Array.from(new Set(offerIds));
+  const result = new Map<string, VerifiedEtaFact>();
+  if (uniqueIds.length === 0) return result;
+
+  const events = await db.driveCrmEvent.findMany({
+    where: { offerId: { in: uniqueIds }, eventType: "OPERATIONAL_ETA" },
+    orderBy: { createdAt: "desc" },
+  });
+
+  const latestByOffer = new Map<string, (typeof events)[number]>();
+  for (const event of events) {
+    // events is ordered by createdAt desc, so the first one seen per offerId
+    // is that offer's latest — same "most recent row wins" rule as
+    // openBreakdownForDrivers.
+    if (event.offerId && !latestByOffer.has(event.offerId)) {
+      latestByOffer.set(event.offerId, event);
+    }
+  }
+
+  for (const offerId of uniqueIds) {
+    const latest = latestByOffer.get(offerId);
+    const details = (latest?.details ?? null) as { delayed?: boolean; arrived?: boolean } | null;
+    result.set(offerId, {
+      etaMinutes: latest?.etaMinutes ?? null,
+      freshness: latest ? { source: latest.source, asOf: latest.createdAt.toISOString() } : null,
+      delayed: details?.delayed === true,
+      arrived: details?.arrived === true,
+    });
+  }
+  return result;
+}
+
 /** Artur's read-only Drive CRM visibility (spec s.9) — full recent history,
  * never mutation access. */
 export async function operationalHistoryForArtur(driverId: string, limit = 20) {

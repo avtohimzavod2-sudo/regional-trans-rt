@@ -1,4 +1,8 @@
+import Link from "next/link";
 import { recentOperationalEvents } from "@/lib/crm-auto/bridge";
+import { buildLiveFleetPicture } from "@/lib/rt-office/fleet-picture";
+import type { OperationalState } from "@/lib/rt-office/types";
+import { OPERATIONAL_STATE_BADGE, OPERATIONAL_STATE_LABEL_RU, OPERATIONAL_STATE_ORDER } from "@/lib/rt-office/state-labels";
 
 export const dynamic = "force-dynamic";
 
@@ -26,11 +30,109 @@ const EVENT_TYPE_BADGE: Record<string, string> = {
 // (see crm-auto/boundary.test.ts) — a CORRECTION event is shown inline,
 // referencing the id of the event it corrects, never replacing it in this
 // list.
-export default async function DriveCrmPage() {
-  const events = await recentOperationalEvents(75);
+export default async function DriveCrmPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ state?: string }>;
+}) {
+  const { state } = await searchParams;
+  const activeFilter = OPERATIONAL_STATE_ORDER.includes(state as OperationalState) ? (state as OperationalState) : null;
+
+  const [events, fleet] = await Promise.all([recentOperationalEvents(75), buildLiveFleetPicture()]);
+  const visibleVehicles = activeFilter ? fleet.drivers.filter((d) => d.operationalState === activeFilter) : fleet.drivers;
 
   return (
     <div>
+      <section className="mb-6 rounded border border-neutral-800 bg-neutral-900 p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="text-base font-semibold">Сейчас — по автопарку ({fleet.totalDrivers} водителей)</h2>
+          <span className="text-xs text-neutral-500">на {new Date(fleet.generatedAt).toLocaleString("ru-RU")}</span>
+        </div>
+
+        <div className="mb-3 flex flex-wrap gap-2">
+          <Link
+            href="/dispatcher/drive-crm"
+            className={`rounded px-2 py-1 text-xs ${
+              activeFilter === null ? "bg-neutral-200 text-neutral-900" : "bg-neutral-800 text-neutral-300"
+            }`}
+          >
+            Все: {fleet.totalDrivers}
+          </Link>
+          {OPERATIONAL_STATE_ORDER.map((s) => (
+            <Link
+              key={s}
+              href={`/dispatcher/drive-crm?state=${s}`}
+              className={`rounded px-2 py-1 text-xs ${
+                activeFilter === s ? "bg-neutral-200 text-neutral-900" : OPERATIONAL_STATE_BADGE[s]
+              }`}
+            >
+              {OPERATIONAL_STATE_LABEL_RU[s]}: {fleet.counts[s]}
+            </Link>
+          ))}
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs">
+            <thead className="text-neutral-500">
+              <tr>
+                <th className="pr-3 py-1">Водитель</th>
+                <th className="pr-3 py-1">Статус</th>
+                <th className="pr-3 py-1">Маршрут</th>
+                <th className="pr-3 py-1">Места (своб/занят/всего)</th>
+                <th className="pr-3 py-1">ETA</th>
+                <th className="pr-3 py-1">Обратный рейс</th>
+              </tr>
+            </thead>
+            <tbody>
+              {visibleVehicles.map((d) => (
+                <tr key={d.driverId} className="border-t border-neutral-800 align-top">
+                  <td className="pr-3 py-1.5 text-neutral-300">
+                    {d.driverName}
+                    {d.vehicle.carPlate && <div className="text-neutral-600">{d.vehicle.carPlate}</div>}
+                  </td>
+                  <td className="pr-3 py-1.5">
+                    <span className={`rounded px-2 py-0.5 ${OPERATIONAL_STATE_BADGE[d.operationalState]}`}>
+                      {OPERATIONAL_STATE_LABEL_RU[d.operationalState]}
+                    </span>
+                    {d.breakdownOpen && <span className="ml-1 text-red-400">поломка</span>}
+                  </td>
+                  <td className="pr-3 py-1.5 text-neutral-400">
+                    {d.origin && d.destination ? (
+                      <>
+                        {d.origin.nameRu} → {d.destination.nameRu}
+                        {d.departureWindow && (
+                          <div className="text-neutral-600">
+                            {d.departureWindow.travelDate}
+                            {d.departureWindow.start && <> {d.departureWindow.start}–{d.departureWindow.end ?? "?"}</>}
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
+                  <td className="pr-3 py-1.5 text-neutral-400">
+                    {d.seatsAvailable}/{d.seatsOccupied}/{d.seatsTotal}
+                  </td>
+                  <td className="pr-3 py-1.5 text-neutral-400">
+                    {d.etaMinutes !== null ? (
+                      <>
+                        {d.etaMinutes} мин · {d.etaFreshness?.source}
+                        {d.etaFreshness?.stale && <span className="ml-1 text-amber-400">(устарело)</span>}
+                      </>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
+                  <td className="pr-3 py-1.5 text-neutral-400">{d.isReturnLeg ? "да" : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {visibleVehicles.length === 0 && <p className="mt-2 text-neutral-500">Нет водителей с этим статусом.</p>}
+        </div>
+      </section>
+
       <div className="mb-4 flex items-center justify-between">
         <h2 className="text-base font-semibold">Drive CRM — журнал операционных фактов ({events.length})</h2>
       </div>
