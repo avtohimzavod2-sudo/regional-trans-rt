@@ -255,6 +255,40 @@ Two dispatcher screens consume this:
   `searchParams`), above the existing, unmodified append-only
   `DriveCrmEvent` journal table.
 
+### 5.2 Driver Operations Detail + Attention Feed — single-driver deep-dive
+
+`src/lib/rt-office/driver-detail.ts`'s `buildDriverOperationsDetail(driverId)`
+is a single-driver read model for `/dispatcher/drive-crm/[id]` — **not** a
+second snapshot engine. `fleet-picture.ts` now exports its snapshot assembly
+as `buildDriverOperationalSnapshot()` and its context-priority rule as
+`selectCurrentContext()`, and Driver Detail calls these exact functions, so a
+driver's state can never disagree between the fleet-wide "Живая линия"/"Сейчас"
+views and their own detail page. Driver Detail never calls
+`buildLiveFleetPicture().drivers.find(...)` — it runs its own small, fixed set
+of driverId-scoped queries instead, so opening one driver's page never costs a
+whole-fleet query. It also surfaces the driver's recent `DriveCrmEvent`
+history (append-only — a `CORRECTION` is rendered as an additional entry
+referencing the original, never a replacement) and a bounded, recent
+Trip/DriverOffer history, deliberately without passenger identity fields.
+
+`src/lib/rt-office/attention.ts`'s `deriveFleetAttentionFeed(fleet)` is a
+computed, non-persisted `FleetAttentionFeed` — it takes an already-fetched
+`LiveFleetPicture` and derives synchronously, with no DB access of its own, so
+adding it to a dispatcher page never doubles that page's query count. It only
+ever reports facts already present in the snapshot: `BREAKDOWN_OPEN`
+(CRITICAL, from `breakdownOpen`), `VERIFIED_DELAY` (HIGH, from
+`operationalState === "DELAYED"`, which itself only exists via CRM Auto's
+verified delayed signal), `ETA_STALE` (WARNING, from `etaFreshness.stale` —
+worded as "ETA is stale," never as an inference that the driver is late), and
+`ETA_MISSING` (WARNING while underway, INFO before departure — worded as "no
+confirmed ETA," never as "driver is lost"). There is no wall-clock lateness
+inference and no self-computed ETA anywhere in this feed; absent data is
+never treated as an incident. Items sort deterministically by severity
+(CRITICAL > HIGH > WARNING > INFO, stable within a severity) with no LLM
+involved. Both dispatcher screens compute this feed from the `fleet` they
+already fetched, in a "Требует внимания" block, without altering their
+existing sections.
+
 ## 6. Market Acquisition Contractors — Driver / Passenger / Delivery
 
 Three LOW-criticality agents, all reporting to Artur, all read Market Gap

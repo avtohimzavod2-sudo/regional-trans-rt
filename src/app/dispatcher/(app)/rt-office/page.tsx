@@ -1,8 +1,16 @@
+import Link from "next/link";
 import { db } from "@/lib/db";
 import { resolveDemandAgainstSupply } from "@/lib/rt-office/facts";
 import { internalSupplyView } from "@/lib/rt-office/bridge";
 import { buildLiveFleetPicture } from "@/lib/rt-office/fleet-picture";
-import { OPERATIONAL_STATE_BADGE, OPERATIONAL_STATE_LABEL_RU, OPERATIONAL_STATE_ORDER } from "@/lib/rt-office/state-labels";
+import { deriveFleetAttentionFeed } from "@/lib/rt-office/attention";
+import {
+  ATTENTION_SEVERITY_BADGE,
+  ATTENTION_SEVERITY_LABEL_RU,
+  OPERATIONAL_STATE_BADGE,
+  OPERATIONAL_STATE_LABEL_RU,
+  OPERATIONAL_STATE_ORDER,
+} from "@/lib/rt-office/state-labels";
 
 export const dynamic = "force-dynamic";
 
@@ -15,6 +23,9 @@ export const dynamic = "force-dynamic";
 // directive: one exclusion-aware resolution path, reused everywhere.
 export default async function RtOfficePage() {
   const fleet = await buildLiveFleetPicture();
+  // Derived from the fleet we already fetched above — no second DB read
+  // (spec DRIVER OPERATIONS CENTER s.15).
+  const attention = deriveFleetAttentionFeed(fleet);
   const pendingRequests = await db.tripRequest.findMany({
     where: { status: { in: ["PENDING", "MATCHING"] } },
     include: { origin: true, destination: true, passenger: true },
@@ -71,6 +82,42 @@ export default async function RtOfficePage() {
           </div>
         </div>
 
+        <div className="mb-4 rounded border border-neutral-800 bg-neutral-950 p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <h3 className="text-sm font-semibold">Требует внимания ({attention.items.length})</h3>
+            <div className="flex gap-2 text-xs">
+              <span className={`rounded px-2 py-0.5 ${ATTENTION_SEVERITY_BADGE.CRITICAL}`}>
+                {ATTENTION_SEVERITY_LABEL_RU.CRITICAL}: {attention.counts.CRITICAL}
+              </span>
+              <span className={`rounded px-2 py-0.5 ${ATTENTION_SEVERITY_BADGE.HIGH}`}>
+                {ATTENTION_SEVERITY_LABEL_RU.HIGH}: {attention.counts.HIGH}
+              </span>
+              <span className={`rounded px-2 py-0.5 ${ATTENTION_SEVERITY_BADGE.WARNING}`}>
+                {ATTENTION_SEVERITY_LABEL_RU.WARNING}: {attention.counts.WARNING}
+              </span>
+            </div>
+          </div>
+          <div className="space-y-1">
+            {attention.items.slice(0, 10).map((item, i) => (
+              <Link
+                key={`${item.driverId}-${item.type}-${i}`}
+                href={`/dispatcher/drive-crm/${item.driverId}`}
+                className="flex items-center justify-between rounded border border-neutral-800 bg-neutral-900 p-2 text-xs hover:border-neutral-700"
+              >
+                <span className="text-neutral-300">
+                  {item.driverName}
+                  {item.vehicle.carPlate && <span className="text-neutral-600"> · {item.vehicle.carPlate}</span>}
+                  <span className="ml-2 text-neutral-500">{item.message}</span>
+                </span>
+                <span className={`rounded px-2 py-0.5 ${ATTENTION_SEVERITY_BADGE[item.severity]}`}>
+                  {ATTENTION_SEVERITY_LABEL_RU[item.severity]}
+                </span>
+              </Link>
+            ))}
+            {attention.items.length === 0 && <p className="text-xs text-neutral-500">Сейчас ничего не требует внимания.</p>}
+          </div>
+        </div>
+
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs">
             <thead className="text-neutral-500">
@@ -87,7 +134,9 @@ export default async function RtOfficePage() {
               {fleet.drivers.map((d) => (
                 <tr key={d.driverId} className="border-t border-neutral-800 align-top">
                   <td className="pr-3 py-1.5 text-neutral-300">
-                    {d.driverName}
+                    <Link href={`/dispatcher/drive-crm/${d.driverId}`} className="hover:underline">
+                      {d.driverName}
+                    </Link>
                     {d.vehicle.carPlate && <div className="text-neutral-600">{d.vehicle.carPlate}</div>}
                   </td>
                   <td className="pr-3 py-1.5">

@@ -43,17 +43,17 @@ const OPERATIONAL_STATES: OperationalState[] = [
 // that is not real usable capacity today.
 const USABLE_SUPPLY_STATES = new Set<OperationalState>(["AVAILABLE", "PLANNED", "WAITING_DEPARTURE", "EN_ROUTE", "DELAYED"]);
 
-const NON_TERMINAL_TRIP_STATUSES = ["SCHEDULED", "IN_PROGRESS"] as const;
-const OPEN_OFFER_STATUSES = ["OPEN", "PARTIALLY_FILLED"] as const;
+export const NON_TERMINAL_TRIP_STATUSES = ["SCHEDULED", "IN_PROGRESS"] as const;
+export const OPEN_OFFER_STATUSES = ["OPEN", "PARTIALLY_FILLED"] as const;
 
-type OfferWithStops = DriverOffer & { origin: Stop; destination: Stop };
-type TripWithOffer = Trip & { driverOffer: OfferWithStops };
+export type OfferWithStops = DriverOffer & { origin: Stop; destination: Stop };
+export type TripWithOffer = Trip & { driverOffer: OfferWithStops };
 
-function toStopSummary(stop: Stop): StopNameSummary {
+export function toStopSummary(stop: Stop): StopNameSummary {
   return { id: stop.id, nameRu: stop.nameRu, nameKy: stop.nameKy, nameEn: stop.nameEn };
 }
 
-function driverDisplayName(driver: Pick<Driver, "name" | "telegramUsername" | "telegramUserId">): string {
+export function driverDisplayName(driver: Pick<Driver, "name" | "telegramUsername" | "telegramUserId">): string {
   return driver.name ?? driver.telegramUsername ?? driver.telegramUserId;
 }
 
@@ -99,7 +99,7 @@ async function latestOpenOffersByDriver(driverIds: string[]): Promise<Map<string
   return new Map(offers.map((o) => [o.driverId, o as OfferWithStops]));
 }
 
-interface CurrentContext {
+export interface CurrentContext {
   offer: OfferWithStops | null;
   tripId: string | null;
   tripStatus: OperationalStateInput["activeTripStatus"];
@@ -119,23 +119,35 @@ interface CurrentContext {
  *   4. Else no context at all (a driver who has never posted or received a
  *      trip): the fleet picture falls through to deriveOperationalState's
  *      own AVAILABLE/OFFLINE default from driver.status alone.
+ *
+ * Pure and driverId-agnostic — this is the single source of context-priority
+ * truth shared by the bulk fleet path (which resolves its three inputs via
+ * Map lookups) and the single-driver Driver Detail path (which resolves them
+ * via direct findFirst results), so the two views can never disagree about
+ * the same driver at the same instant (spec DRIVER OPERATIONS CENTER s.2/s.3).
  */
+export function selectCurrentContext(
+  nonTerminalTrip: TripWithOffer | null,
+  openOffer: OfferWithStops | null,
+  fallbackTrip: TripWithOffer | null,
+): CurrentContext {
+  if (nonTerminalTrip) return { offer: nonTerminalTrip.driverOffer, tripId: nonTerminalTrip.id, tripStatus: nonTerminalTrip.status };
+  if (openOffer) return { offer: openOffer, tripId: null, tripStatus: null };
+  if (fallbackTrip) return { offer: fallbackTrip.driverOffer, tripId: fallbackTrip.id, tripStatus: fallbackTrip.status };
+  return { offer: null, tripId: null, tripStatus: null };
+}
+
 function pickCurrentContext(
   driverId: string,
   nonTerminalTrips: Map<string, TripWithOffer>,
   openOffers: Map<string, OfferWithStops>,
   fallbackTrips: Map<string, TripWithOffer>,
 ): CurrentContext {
-  const trip = nonTerminalTrips.get(driverId);
-  if (trip) return { offer: trip.driverOffer, tripId: trip.id, tripStatus: trip.status };
-
-  const offer = openOffers.get(driverId);
-  if (offer) return { offer, tripId: null, tripStatus: null };
-
-  const fallbackTrip = fallbackTrips.get(driverId);
-  if (fallbackTrip) return { offer: fallbackTrip.driverOffer, tripId: fallbackTrip.id, tripStatus: fallbackTrip.status };
-
-  return { offer: null, tripId: null, tripStatus: null };
+  return selectCurrentContext(
+    nonTerminalTrips.get(driverId) ?? null,
+    openOffers.get(driverId) ?? null,
+    fallbackTrips.get(driverId) ?? null,
+  );
 }
 
 function isEtaStale(asOf: string, now: Date, stalenessMinutes: number): boolean {
@@ -153,7 +165,14 @@ function emptyCounts(): Record<OperationalState, number> {
   return counts;
 }
 
-function buildSnapshot(
+/**
+ * The single per-driver snapshot builder (spec DRIVER OPERATIONS CENTER
+ * s.2/s.3: "must not create a second snapshot algorithm") — used by both the
+ * bulk buildLiveFleetPicture() path and the single-driver Driver Detail path
+ * so a given driver's derived state can never disagree between the two
+ * views.
+ */
+export function buildDriverOperationalSnapshot(
   driver: Driver,
   context: CurrentContext,
   breakdownOpen: boolean,
@@ -243,7 +262,7 @@ export async function buildLiveFleetPicture(now: Date = new Date()): Promise<Liv
   const snapshots: DriverOperationalSnapshot[] = drivers.map((driver) => {
     const context = contexts.get(driver.id)!;
     const eta = (context.offer && etaByOffer.get(context.offer.id)) || noEta;
-    const snapshot = buildSnapshot(driver, context, breakdownByDriver.get(driver.id) ?? false, eta, now, stalenessMinutes);
+    const snapshot = buildDriverOperationalSnapshot(driver, context, breakdownByDriver.get(driver.id) ?? false, eta, now, stalenessMinutes);
 
     counts[snapshot.operationalState] += 1;
     if (USABLE_SUPPLY_STATES.has(snapshot.operationalState)) {
