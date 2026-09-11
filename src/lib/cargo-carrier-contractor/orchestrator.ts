@@ -5,20 +5,29 @@
 // CARGO_OPERATIONS — a namespace/department string, never a new named agent
 // this module invents. NOT Cargo Operations itself: never matches loads,
 // never confirms a real TransportAsset fact, never handles money.
+import type { CargoCarrierProspect, Channel } from "@prisma/client";
 import { normalizePhone } from "@/lib/agents/scout";
 import type { AgentContext, AgentContract } from "@/lib/agents/types";
 import { logAgentAction } from "@/lib/agents/trace";
 import { classifyMarketRole, isActionableClassification } from "@/lib/acquisition/role-classifier";
 import { sendAcquisitionOutreach } from "@/lib/acquisition/outreach-log";
 import { computeContactFingerprint } from "@/lib/prospecting/identity";
-import { createProspectHandoff } from "@/lib/prospecting/handoff";
+import { createProspectHandoff, type CreateProspectHandoffResult } from "@/lib/prospecting/handoff";
+import { ProspectLifecycleNotFoundError, type LifecycleTransitionResult } from "@/lib/prospecting/lifecycle";
+import { sendProspectFollowUp, type FollowUpOutcome } from "@/lib/acquisition/follow-up";
 import {
   canTransitionCargoCarrierProspect,
+  captureCargoCarrierQualificationFacts,
   createCargoCarrierProspect,
   findExistingCargoCarrierProspect,
+  findPossibleDuplicateCargoCarrierProspect,
+  flagCargoCarrierPossibleDuplicate,
+  getCargoCarrierProspect,
+  recordCargoCarrierFollowUpCounters,
+  transitionCargoCarrierLifecycleStage,
   transitionCargoCarrierProspectStatus,
 } from "./prospect";
-import type { CargoCarrierContractorOutcome, CargoCarrierHandoffOutcome, CargoCarrierSightingInput } from "./types";
+import type { CargoCarrierContractorOutcome, CargoCarrierHandoffOutcome, CargoCarrierQualificationFacts, CargoCarrierSightingInput } from "./types";
 
 export const CARGO_CARRIER_CONTRACTOR_AGENT_CONTRACT: AgentContract = {
   name: "CARGO_CARRIER_CONTRACTOR",
@@ -209,4 +218,217 @@ export async function handoffCargoCarrierProspect(
 
   const prospect = await transitionCargoCarrierProspectStatus(prospectId, "HANDED_OFF");
   return { handoff, deduplicated, prospect };
+}
+
+// --- Task D: additive ProspectLifecycleStage layer -------------------------
+// Everything below drives the richer 11-state lifecycleStage pipeline (spec
+// B) as an independent dimension layered on top of everything above, which
+// is left completely unmodified. A dispatcher may drive a prospect through
+// either dimension, both, or neither — this module never assumes the other
+// dimension has been touched.
+
+/** DISCOVERED -> QUALIFICATION_PENDING: the dispatcher has started looking
+ * into a fresh sighting. */
+export async function beginCargoCarrierQualification(ctx: AgentContext, prospectId: string): Promise<LifecycleTransitionResult<CargoCarrierProspect>> {
+  const result = await transitionCargoCarrierLifecycleStage(prospectId, "QUALIFICATION_PENDING");
+  if (!result.deduplicated) {
+    await logAgentAction({ ctx, agent: "CARGO_CARRIER_CONTRACTOR", action: "cargo_carrier_contractor.qualification_started", entityType: "CargoCarrierProspect", entityId: prospectId });
+  }
+  return result;
+}
+
+/** Captures qualification facts (first-write-wins, spec B/D) and, whenever a
+ * carrier identity name becomes known, checks for a possible duplicate by
+ * that name against every OTHER prospect — flagging, never merging (spec E). */
+export async function submitCargoCarrierQualification(
+  ctx: AgentContext,
+  prospectId: string,
+  facts: CargoCarrierQualificationFacts,
+): Promise<CargoCarrierProspect> {
+  const prospect = await captureCargoCarrierQualificationFacts(prospectId, facts);
+
+  if (prospect.carrierIdentityName && !prospect.possibleDuplicateOfId) {
+    const possibleDuplicate = await findPossibleDuplicateCargoCarrierProspect(prospect.carrierIdentityName, prospectId);
+    if (possibleDuplicate) {
+      const flagged = await flagCargoCarrierPossibleDuplicate(prospectId, possibleDuplicate.id);
+      await logAgentAction({
+        ctx,
+        agent: "CARGO_CARRIER_CONTRACTOR",
+        action: "cargo_carrier_contractor.possible_duplicate_flagged",
+        entityType: "CargoCarrierProspect",
+        entityId: prospectId,
+        details: { possibleDuplicateOfId: possibleDuplicate.id },
+      });
+      return flagged;
+    }
+  }
+
+  return prospect;
+}
+
+/** QUALIFICATION_PENDING -> QUALIFIED. */
+export async function qualifyCargoCarrierLead(ctx: AgentContext, prospectId: string): Promise<LifecycleTransitionResult<CargoCarrierProspect>> {
+  const result = await transitionCargoCarrierLifecycleStage(prospectId, "QUALIFIED");
+  if (!result.deduplicated) {
+    await logAgentAction({ ctx, agent: "CARGO_CARRIER_CONTRACTOR", action: "cargo_carrier_contractor.lead_qualified", entityType: "CargoCarrierProspect", entityId: prospectId });
+  }
+  return result;
+}
+
+/** QUALIFICATION_PENDING/CONTACTED/FOLLOW_UP_PENDING -> REJECTED. Reason is
+ * always recorded — spec B: "rejection reason where applicable". */
+export async function rejectCargoCarrierLead(ctx: AgentContext, prospectId: string, rejectionReason: string): Promise<LifecycleTransitionResult<CargoCarrierProspect>> {
+  const result = await transitionCargoCarrierLifecycleStage(prospectId, "REJECTED", { rejectionReason });
+  if (!result.deduplicated) {
+    await logAgentAction({ ctx, agent: "CARGO_CARRIER_CONTRACTOR", action: "cargo_carrier_contractor.lead_rejected", entityType: "CargoCarrierProspect", entityId: prospectId, details: { rejectionReason } });
+  }
+  return result;
+}
+
+/** QUALIFIED -> CONTACT_PENDING -> CONTACTED (spec B minimum pipeline). */
+export async function moveCargoCarrierToContactPending(ctx: AgentContext, prospectId: string): Promise<LifecycleTransitionResult<CargoCarrierProspect>> {
+  return transitionCargoCarrierLifecycleStage(prospectId, "CONTACT_PENDING");
+}
+
+export async function markCargoCarrierContacted(ctx: AgentContext, prospectId: string): Promise<LifecycleTransitionResult<CargoCarrierProspect>> {
+  const result = await transitionCargoCarrierLifecycleStage(prospectId, "CONTACTED");
+  if (!result.deduplicated) {
+    await logAgentAction({ ctx, agent: "CARGO_CARRIER_CONTRACTOR", action: "cargo_carrier_contractor.lead_contacted", entityType: "CargoCarrierProspect", entityId: prospectId });
+  }
+  return result;
+}
+
+export interface CargoCarrierFollowUpParams {
+  channel: Channel;
+  sourceType: CargoCarrierSightingInput["sourceType"];
+  sourceRef?: string | null;
+  to: string;
+  text: string;
+  contactFingerprint?: string | null;
+}
+
+/** Bounded, retry-safe, stoppable follow-up (spec F) — delegates every stop
+ * condition (already responded, terminal stage, MAX_FOLLOW_UP_ATTEMPTS) to
+ * the shared src/lib/acquisition/follow-up.ts module rather than
+ * reimplementing the bound here. CONTACTED -> FOLLOW_UP_PENDING advances on
+ * the first real attempt; a second/third attempt is a no-op transition
+ * (already FOLLOW_UP_PENDING). */
+export async function followUpWithCargoCarrierProspect(
+  ctx: AgentContext,
+  prospectId: string,
+  params: CargoCarrierFollowUpParams,
+): Promise<{ prospect: CargoCarrierProspect; outcome: FollowUpOutcome }> {
+  const prospect = await getCargoCarrierProspect(prospectId);
+  if (!prospect) throw new ProspectLifecycleNotFoundError(prospectId);
+
+  const hasResponded = prospect.respondedAt != null;
+  const isTerminal = prospect.lifecycleStage !== "CONTACTED" && prospect.lifecycleStage !== "FOLLOW_UP_PENDING";
+
+  const outcome = await sendProspectFollowUp(ctx, {
+    contractorAgent: "CARGO_CARRIER_CONTRACTOR",
+    prospectType: "CARGO_CARRIER",
+    prospectRef: prospectId,
+    channel: params.channel,
+    sourceType: params.sourceType,
+    sourceRef: params.sourceRef,
+    to: params.to,
+    text: params.text,
+    contactFingerprint: params.contactFingerprint,
+    idempotencyKey: `cargo-carrier-contractor:${prospectId}:follow-up:${prospect.followUpCount + 1}`,
+    hasResponded,
+    isTerminal,
+  });
+
+  if (outcome.skippedReason) {
+    return { prospect, outcome };
+  }
+
+  await transitionCargoCarrierLifecycleStage(prospectId, "FOLLOW_UP_PENDING");
+  const updated = await recordCargoCarrierFollowUpCounters(prospectId, outcome.attemptNumber);
+
+  return { prospect: updated, outcome };
+}
+
+/** CONTACTED/FOLLOW_UP_PENDING -> RESPONDED. Stamps respondedAt, which
+ * followUpWithCargoCarrierProspect / sendProspectFollowUp treat as an
+ * immediate, permanent stop condition for further follow-up. */
+export async function recordCargoCarrierResponse(ctx: AgentContext, prospectId: string): Promise<LifecycleTransitionResult<CargoCarrierProspect>> {
+  const result = await transitionCargoCarrierLifecycleStage(prospectId, "RESPONDED", { respondedAt: new Date() });
+  if (!result.deduplicated) {
+    await logAgentAction({ ctx, agent: "CARGO_CARRIER_CONTRACTOR", action: "cargo_carrier_contractor.lead_responded", entityType: "CargoCarrierProspect", entityId: prospectId });
+  }
+  return result;
+}
+
+/** RESPONDED -> HANDOFF_READY. */
+export async function markCargoCarrierHandoffReady(ctx: AgentContext, prospectId: string): Promise<LifecycleTransitionResult<CargoCarrierProspect>> {
+  const result = await transitionCargoCarrierLifecycleStage(prospectId, "HANDOFF_READY");
+  if (!result.deduplicated) {
+    await logAgentAction({ ctx, agent: "CARGO_CARRIER_CONTRACTOR", action: "cargo_carrier_contractor.handoff_ready", entityType: "CargoCarrierProspect", entityId: prospectId });
+  }
+  return result;
+}
+
+export interface CompleteCargoCarrierHandoffResult {
+  prospect: CargoCarrierProspect;
+  deduplicated: boolean;
+  handoff: CreateProspectHandoffResult["handoff"];
+  handoffDeduplicated: boolean;
+}
+
+/** HANDOFF_READY -> HANDED_OFF, alongside the same structured ProspectHandoff
+ * contract every contragent uses (spec G) — only verified/known facts plus
+ * provenance/confidence, never operational authority. Both the ProspectHandoff
+ * creation (idempotencyKey) and the lifecycleStage transition (CAS) are
+ * independently duplicate-safe, so calling this twice for the same prospect
+ * is a safe no-op (spec: duplicate handoff prevention). */
+export async function completeCargoCarrierHandoff(
+  ctx: AgentContext,
+  prospectId: string,
+): Promise<CompleteCargoCarrierHandoffResult> {
+  const prospect = await getCargoCarrierProspect(prospectId);
+  if (!prospect) throw new ProspectLifecycleNotFoundError(prospectId);
+
+  const fingerprint = computeContactFingerprint({ phone: prospect.rawPhone, telegramUsername: prospect.rawTelegramUsername });
+
+  const availableCapabilities = [
+    prospect.fleetTypeText,
+    prospect.cargoBodyTypeText,
+    prospect.geographicCoverageText,
+    prospect.localIntercityInternationalText,
+    prospect.recurringRoutesNote,
+    prospect.schedulingText,
+    prospect.rawCapacityText,
+    prospect.rawRouteText,
+    prospect.rawTemperatureCapability ? "temperature-controlled" : null,
+    prospect.rawBackhaulText,
+  ].filter((v): v is string => !!v);
+
+  const { handoff, deduplicated: handoffDeduplicated } = await createProspectHandoff(ctx, {
+    prospectType: "CARGO_CARRIER_SUPPLY",
+    prospectRef: prospectId,
+    sourceAgent: "CARGO_CARRIER_CONTRACTOR",
+    targetAgentOrDepartment: "CARGO_OPERATIONS",
+    expressedInterest: "yes",
+    contactData: prospect.rawPhone ?? prospect.rawTelegramUsername ?? "UNKNOWN",
+    requestedService: prospect.carrierIdentityName ?? prospect.rawVehicleText ?? "UNKNOWN",
+    availableCapabilities,
+    contactFingerprint: fingerprint,
+    idempotencyKey: `cargo-carrier-contractor:${prospectId}:lifecycle-handoff:CARGO_OPERATIONS`,
+  });
+
+  const { prospect: updated, deduplicated } = await transitionCargoCarrierLifecycleStage(prospectId, "HANDED_OFF");
+
+  if (!deduplicated) {
+    await logAgentAction({
+      ctx,
+      agent: "CARGO_CARRIER_CONTRACTOR",
+      action: "cargo_carrier_contractor.lifecycle_handed_off",
+      entityType: "CargoCarrierProspect",
+      entityId: prospectId,
+      details: { targetAgentOrDepartment: "CARGO_OPERATIONS", handoffId: handoff.id },
+    });
+  }
+
+  return { prospect: updated, deduplicated, handoff, handoffDeduplicated };
 }

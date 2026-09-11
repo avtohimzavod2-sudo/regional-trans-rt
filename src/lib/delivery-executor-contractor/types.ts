@@ -30,3 +30,20 @@ export type DeliveryExecutorContractorOutcome =
   | { outcome: "PROSPECT_CREATED"; prospect: DeliveryExecutorProspect; classification: MarketRoleClassification; outreach: OutreachOutcome | null };
 
 export type DeliveryExecutorHandoffOutcome = CreateProspectHandoffResult & { prospect: DeliveryExecutorProspect };
+
+// Task D spec A qualification capture. Every field is optional and free-text
+// — "do NOT fabricate unknown information": a field the dispatcher/source
+// hasn't actually established is simply omitted, never guessed. Vehicle type
+// is already covered by the pre-existing rawVehicleText field (spec s.5); no
+// duplicate field is introduced for it here.
+export interface DeliveryExecutorQualificationFacts {
+  executorType?: string;
+  personOrCompanyName?: string;
+  serviceAreaText?: string;
+  maxLoadText?: string;
+  dimensionsText?: string;
+  localOrIntercityText?: string;
+  availabilityText?: string;
+  contactChannelsText?: string;
+  evidenceNotes?: string;
+}

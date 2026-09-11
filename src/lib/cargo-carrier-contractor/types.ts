@@ -35,3 +35,21 @@ export type CargoCarrierContractorOutcome =
   | { outcome: "PROSPECT_CREATED"; prospect: CargoCarrierProspect; classification: MarketRoleClassification; outreach: OutreachOutcome | null };
 
 export type CargoCarrierHandoffOutcome = CreateProspectHandoffResult & { prospect: CargoCarrierProspect };
+
+// Task D spec B qualification capture. Every field is optional and free-text
+// — "never infer capacity, route, licensing, refrigeration or availability
+// without evidence": a field the dispatcher/source hasn't actually
+// established is simply omitted, never guessed. Vehicle/capacity/route/
+// temperature/backhaul claims are already covered by the pre-existing
+// rawVehicleText/rawCapacityText/rawRouteText/rawTemperatureCapability/
+// rawBackhaulText fields (spec s.6); no duplicate fields are introduced here.
+export interface CargoCarrierQualificationFacts {
+  carrierIdentityName?: string;
+  fleetTypeText?: string;
+  cargoBodyTypeText?: string;
+  geographicCoverageText?: string;
+  localIntercityInternationalText?: string;
+  recurringRoutesNote?: string;
+  schedulingText?: string;
+  evidenceNotes?: string;
+}

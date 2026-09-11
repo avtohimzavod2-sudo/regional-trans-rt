@@ -2446,6 +2446,36 @@ enum CargoCarrierProspectStatus {
   SPAM
 }
 
+// Additive, richer lifecycle for Contragents #3/#4 (docs/architecture/
+// prospecting.md s.12) layered ALONGSIDE — never replacing — each prospect's
+// existing coarse `status` above. `status` keeps its exact original meaning
+// so every pre-existing orchestrator.ts/test.ts assertion stays valid;
+// `lifecycleStage` is the new granular pipeline the dispatcher/qualification/
+// follow-up/handoff-readiness machinery below actually drives. Same
+// additive-layering idiom as PassengerLoopRun's own state machine sitting on
+// top of Match/TripRequest's unchanged statuses.
+enum ProspectLifecycleStage {
+  DISCOVERED
+  QUALIFICATION_PENDING
+  QUALIFIED
+  REJECTED
+  CONTACT_PENDING
+  CONTACTED
+  FOLLOW_UP_PENDING
+  RESPONDED
+  HANDOFF_READY
+  HANDED_OFF
+  CLOSED
+}
+
+// How a captured qualification fact was obtained — never promoted past
+// SELF_REPORTED without independent verification, and never fabricated.
+enum ProspectVerificationStatus {
+  UNVERIFIED
+  SELF_REPORTED
+  VERIFIED
+}
+
 // Master spec s.5's honesty requirement: an outreach adapter must never
 // report a fabricated successful send. SENT is real-delivery-confirmed;
 // DRY_RUN/SANDBOX/NO_PROVIDER_CONFIGURED are all honest non-delivery states,
@@ -2635,8 +2665,36 @@ model DeliveryExecutorProspect {
   createdAt           DateTime                        @default(now())
   updatedAt           DateTime                        @updatedAt
 
+  // Additive granular pipeline (spec s.12) — see ProspectLifecycleStage.
+  lifecycleStage      ProspectLifecycleStage         @default(DISCOVERED)
+  // Structured qualification capture (spec s.12.A). Every field stays null
+  // until a real, evidenced fact is available — "unknown facts remain
+  // unknown," never inferred. First-write-wins in code (prospect.ts) so a
+  // later call can never silently overwrite already-captured evidence.
+  executorType        String? // individual courier / taxi driver / local delivery driver / motorcycle-scooter courier / van driver / pickup owner / courier service / regional operator
+  personOrCompanyName String?
+  serviceAreaText     String? // cities/regions covered
+  maxLoadText         String?
+  dimensionsText      String?
+  localOrIntercityText String?
+  availabilityText    String?
+  contactChannelsText String?
+  confidence          Float?
+  verificationStatus  ProspectVerificationStatus      @default(UNVERIFIED)
+  evidenceNotes       String?
+  rejectionReason     String?
+  // Loose correlation id into another DeliveryExecutorProspect this one may
+  // be the same real person/entity as — set only on a deterministic-but-weak
+  // signal (never a name-similarity guess), never merged automatically (spec
+  // s.12.E: "when uncertain, keep separate and flag").
+  possibleDuplicateOfId String?
+  followUpCount       Int                             @default(0)
+  lastFollowUpAt      DateTime?
+  respondedAt         DateTime?
+
   @@index([status, createdAt])
   @@index([normalizedPhone])
+  @@index([lifecycleStage, createdAt])
 }
 
 // CARGO_CARRIER_CONTRACTOR's exclusive write surface (Contragent #4).
@@ -2662,8 +2720,55 @@ model CargoCarrierProspect {
   createdAt                DateTime                    @default(now())
   updatedAt                DateTime                    @updatedAt
 
+  // Additive granular pipeline (spec s.12) — see ProspectLifecycleStage.
+  lifecycleStage           ProspectLifecycleStage      @default(DISCOVERED)
+  // Structured qualification capture (spec s.12.B). Every field stays null
+  // until a real, evidenced fact is available — never inferred (capacity,
+  // route, licensing, refrigeration, availability). First-write-wins in code
+  // (prospect.ts) so a later call can never silently overwrite already-
+  // captured evidence.
+  carrierIdentityName      String?
+  fleetTypeText            String? // cargo van / truck / refrigerated / box truck / flatbed / intercity freight / regional operator / logistics company / freight forwarder
+  cargoBodyTypeText        String?
+  geographicCoverageText   String?
+  localIntercityInternationalText String?
+  recurringRoutesNote      String? // distinct from the free-text claim already on rawRouteText — set only once a recurring route is *confirmed*, not merely mentioned
+  schedulingText           String?
+  confidence               Float?
+  verificationStatus       ProspectVerificationStatus  @default(UNVERIFIED)
+  evidenceNotes            String?
+  rejectionReason          String?
+  // Loose correlation id into another CargoCarrierProspect this one may be
+  // the same real person/entity as — set only on a deterministic-but-weak
+  // signal (never a name-similarity guess), never merged automatically (spec
+  // s.12.E: "when uncertain, keep separate and flag").
+  possibleDuplicateOfId    String?
+  followUpCount            Int                         @default(0)
+  lastFollowUpAt           DateTime?
+  respondedAt              DateTime?
+
   @@index([status, createdAt])
   @@index([normalizedPhone])
+  @@index([lifecycleStage, createdAt])
+}
+
+// Shared, additive follow-up ledger for every acquisition contragent's
+// bounded, auditable, retry-safe follow-up sends (spec s.12.F) — see
+// src/lib/acquisition/follow-up.ts. Append-only, same idiom as
+// AcquisitionOutreachEvent; attemptNumber + the unique idempotencyKey are
+// what makes a runaway/duplicate follow-up loop structurally impossible
+// rather than merely policy-discouraged.
+model ProspectFollowUpAttempt {
+  id              String                  @id @default(cuid())
+  prospectType    AcquisitionProspectType
+  prospectRef     String
+  contractorAgent AgentName
+  attemptNumber   Int
+  outreachStatus  OutreachStatus
+  idempotencyKey  String                  @unique
+  createdAt       DateTime                @default(now())
+
+  @@index([prospectType, prospectRef, attemptNumber])
 }
 
 // Prospecting Core's own, additive persistence for the shared handoff

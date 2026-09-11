@@ -20,6 +20,14 @@ contragent uses:
   write. Directly unit-tested in `src/lib/acquisition/outreach-log.test.ts`.
 - `isDoNotContact()` / `isDoNotContactFingerprint()` / `recordOptOut()` —
   append-only opt-out derivation, both per-prospect and cross-contragent.
+- `sendProspectFollowUp()` (`follow-up.ts`) — the shared, bounded
+  follow-up machinery every contragent's `FOLLOW_UP_PENDING` retry step
+  funnels through (see s.11 below). Lives here, not under
+  `src/lib/prospecting/`, precisely because it calls
+  `sendAcquisitionOutreach()` directly — `src/lib/prospecting/boundary.test.ts`
+  forbids anything under `prospecting/` from doing that (prospecting/ is a
+  dependency-free contract layer; only `acquisition/`'s own modules may call
+  its own safety gate).
 - `classifyMarketRole()` / `isActionableClassification()` — shared NLU
   (`src/lib/acquisition/role-classifier.ts`) with a 0.55 confidence floor
   and a 7-value role vocabulary (`PASSENGER`, `DRIVER`,
@@ -208,7 +216,97 @@ test names: `src/lib/prospecting/handoff.test.ts` (A-D, F, P),
 `src/lib/{delivery-executor,cargo-carrier}-contractor/orchestrator.test.ts`
 (K, L, N, O).
 
-## 11. What this stage deliberately does not do
+Task D's s.11 granular lifecycle adds its own dedicated coverage:
+`src/lib/prospecting/lifecycle.test.ts` (generic CAS transition engine,
+first-write-wins capture, verification-status monotonicity, duplicate
+flagging), `src/lib/acquisition/follow-up.test.ts` (bounded/idempotent
+follow-up), `src/lib/{delivery-executor,cargo-carrier}-contractor/
+orchestrator.lifecycle.test.ts` (per-contragent lifecycle orchestration —
+successful lifecycle, rejection, unknown-facts-stay-unknown, duplicate
+discovery/flagging, idempotent repeated transitions, invalid-transition
+rejection, follow-up stop conditions, handoff idempotency, provenance
+preservation), and `src/lib/prospecting/cross-contamination.test.ts` (both
+prospect types coexist without either touching the other's Prisma
+delegate).
+
+## 11. Delivery Executor / Cargo Carrier granular lifecycle (Task D)
+
+Contragents #3 and #4 (`DeliveryExecutorProspect`, `CargoCarrierProspect`)
+carry a second, additive `lifecycleStage: ProspectLifecycleStage` column
+alongside their original `status` field. This is layered on top of, and
+never replaces or reinterprets, the pre-existing `status` enum/transitions —
+existing code paths that only look at `status` are unaffected.
+
+```
+DISCOVERED -> QUALIFICATION_PENDING -> QUALIFIED | REJECTED
+QUALIFIED -> CONTACT_PENDING -> CONTACTED
+CONTACTED -> FOLLOW_UP_PENDING | RESPONDED | REJECTED
+FOLLOW_UP_PENDING -> RESPONDED | REJECTED
+RESPONDED -> HANDOFF_READY -> HANDED_OFF -> CLOSED
+REJECTED -> CLOSED
+```
+
+`src/lib/prospecting/lifecycle.ts` is the one generic engine both
+contragents' `prospect.ts` drive (no duplicated state machine per
+contragent):
+
+- `transitionProspectLifecycleStage()` — CAS via `updateMany` +
+  reverse-transition membership `where`. A retried/replayed call resolves as
+  a deterministic no-op (`deduplicated: true`); a genuine invariant
+  violation (e.g. `DISCOVERED -> HANDED_OFF`) throws
+  `ProspectLifecycleTransitionError`.
+- `captureQualificationFacts()` — first-write-wins: a field already carrying
+  a non-null value is never overwritten by a later, possibly weaker
+  re-submission; passing `null`/`undefined` for a fact means "still unknown"
+  and never blanks an existing value (spec A/B: "do NOT fabricate unknown
+  information").
+- `upgradeVerificationStatus()` — monotonic
+  `UNVERIFIED -> SELF_REPORTED -> VERIFIED`; never downgrades.
+- `flagPossibleDuplicate()` — sets `possibleDuplicateOfId` only if unset
+  (idempotent); never repoints an already-flagged prospect and never merges
+  two records (spec E: "when uncertain, keep them separate and flag").
+  Per-contragent duplicate detection
+  (`findPossibleDuplicateDeliveryExecutorProspect` /
+  `findPossibleDuplicateCargoCarrierProspect` in each contragent's own
+  `prospect.ts`) is a narrow, exact, case-insensitive name match on
+  `personOrCompanyName` / `carrierIdentityName` respectively — deliberately
+  not a fuzzy match, and never used to merge.
+
+Structured qualification fields (spec A/B) live directly on each Prisma
+model — `executorType`/`personOrCompanyName`/`serviceAreaText`/
+`maxLoadText`/`dimensionsText`/`localOrIntercityText`/`availabilityText`/
+`contactChannelsText` for Delivery Executor; `carrierIdentityName`/
+`fleetTypeText`/`cargoBodyTypeText`/`geographicCoverageText`/
+`localIntercityInternationalText`/`recurringRoutesNote`/`schedulingText` for
+Cargo Carrier — plus the shared `confidence`, `verificationStatus`,
+`evidenceNotes`, `rejectionReason`, `possibleDuplicateOfId`, `followUpCount`,
+`lastFollowUpAt`, `respondedAt` columns on both. Every field defaults to
+`null`/unset and is only ever populated by an evidenced capture call, never
+inferred.
+
+`ProspectFollowUpAttempt` (append-only, same idiom as
+`AcquisitionOutreachEvent`) is the audit trail `sendProspectFollowUp()`
+writes to: `attemptNumber` plus a unique `idempotencyKey` make a
+runaway/duplicate follow-up loop structurally impossible, not merely
+policy-discouraged. `MAX_FOLLOW_UP_ATTEMPTS = 3`; the function checks (in
+order) idempotency-key replay, `hasResponded`, terminal lifecycle stage,
+then the attempt-count bound, before ever calling `sendAcquisitionOutreach()`
+— so follow-up stops the moment a prospect responds, is rejected, or is
+handed off, exactly as spec F requires.
+
+Each contragent's `orchestrator.ts` exposes one function per lifecycle step
+(`beginXQualification`, `submitXQualification`, `qualifyXLead`/
+`rejectXLead`, `moveXToContactPending`, `markXContacted`,
+`followUpWithXProspect`, `recordXResponse`, `markXHandoffReady`,
+`completeXHandoff`) built only from the shared primitives above plus the
+existing `createProspectHandoff()` — no second handoff or dedup engine.
+`completeCargoCarrierHandoff`'s single target is `"CARGO_OPERATIONS"`;
+`completeDeliveryExecutorHandoff`'s is Sapar/Delivery Operations (s.3
+table). `src/lib/prospecting/cross-contamination.test.ts` statically
+asserts Delivery Executor lifecycle calls never touch the
+`cargoCarrierProspect` Prisma delegate and vice versa.
+
+## 12. What this stage deliberately does not do
 
 No five independent scrapers, no shared prospecting database beyond
 `src/lib/acquisition/` + `src/lib/prospecting/`'s existing tables, no

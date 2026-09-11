@@ -6,20 +6,29 @@
 // interested prospect's ProspectHandoff is ACCEPTED by SAPAR/
 // DELIVERY_OPERATIONS (src/lib/prospecting/handoff.ts), the shared Core every
 // acquisition contragent hands off through.
+import type { Channel, DeliveryExecutorProspect } from "@prisma/client";
 import { normalizePhone } from "@/lib/agents/scout";
 import type { AgentContext, AgentContract } from "@/lib/agents/types";
 import { logAgentAction } from "@/lib/agents/trace";
 import { classifyMarketRole, isActionableClassification } from "@/lib/acquisition/role-classifier";
 import { sendAcquisitionOutreach } from "@/lib/acquisition/outreach-log";
 import { computeContactFingerprint } from "@/lib/prospecting/identity";
-import { createProspectHandoff } from "@/lib/prospecting/handoff";
+import { createProspectHandoff, type CreateProspectHandoffResult } from "@/lib/prospecting/handoff";
+import { ProspectLifecycleNotFoundError, type LifecycleTransitionResult } from "@/lib/prospecting/lifecycle";
+import { sendProspectFollowUp, type FollowUpOutcome } from "@/lib/acquisition/follow-up";
 import {
   canTransitionDeliveryExecutorProspect,
+  captureDeliveryExecutorQualificationFacts,
   createDeliveryExecutorProspect,
   findExistingDeliveryExecutorProspect,
+  findPossibleDuplicateDeliveryExecutorProspect,
+  flagDeliveryExecutorPossibleDuplicate,
+  getDeliveryExecutorProspect,
+  recordDeliveryExecutorFollowUpCounters,
+  transitionDeliveryExecutorLifecycleStage,
   transitionDeliveryExecutorProspectStatus,
 } from "./prospect";
-import type { DeliveryExecutorContractorOutcome, DeliveryExecutorHandoffOutcome, DeliveryExecutorSightingInput } from "./types";
+import type { DeliveryExecutorContractorOutcome, DeliveryExecutorHandoffOutcome, DeliveryExecutorQualificationFacts, DeliveryExecutorSightingInput } from "./types";
 
 export const DELIVERY_EXECUTOR_CONTRACTOR_AGENT_CONTRACT: AgentContract = {
   name: "DELIVERY_EXECUTOR_CONTRACTOR",
@@ -192,4 +201,205 @@ export async function handoffDeliveryExecutorProspect(
 
   const prospect = await transitionDeliveryExecutorProspectStatus(prospectId, "HANDED_OFF");
   return { handoff, deduplicated, prospect };
+}
+
+// --- Task D: additive ProspectLifecycleStage layer -------------------------
+// Everything below drives the richer 11-state lifecycleStage pipeline (spec
+// A) as an independent dimension layered on top of everything above, which
+// is left completely unmodified. A dispatcher may drive a prospect through
+// either dimension, both, or neither — this module never assumes the other
+// dimension has been touched.
+
+/** DISCOVERED -> QUALIFICATION_PENDING: the dispatcher has started looking
+ * into a fresh sighting. */
+export async function beginDeliveryExecutorQualification(ctx: AgentContext, prospectId: string): Promise<LifecycleTransitionResult<DeliveryExecutorProspect>> {
+  const result = await transitionDeliveryExecutorLifecycleStage(prospectId, "QUALIFICATION_PENDING");
+  if (!result.deduplicated) {
+    await logAgentAction({ ctx, agent: "DELIVERY_EXECUTOR_CONTRACTOR", action: "delivery_executor_contractor.qualification_started", entityType: "DeliveryExecutorProspect", entityId: prospectId });
+  }
+  return result;
+}
+
+/** Captures qualification facts (first-write-wins, spec A/D) and, whenever a
+ * person/company name becomes known, checks for a possible duplicate by that
+ * name against every OTHER prospect — flagging, never merging (spec E). */
+export async function submitDeliveryExecutorQualification(
+  ctx: AgentContext,
+  prospectId: string,
+  facts: DeliveryExecutorQualificationFacts,
+): Promise<DeliveryExecutorProspect> {
+  const prospect = await captureDeliveryExecutorQualificationFacts(prospectId, facts);
+
+  if (prospect.personOrCompanyName && !prospect.possibleDuplicateOfId) {
+    const possibleDuplicate = await findPossibleDuplicateDeliveryExecutorProspect(prospect.personOrCompanyName, prospectId);
+    if (possibleDuplicate) {
+      const flagged = await flagDeliveryExecutorPossibleDuplicate(prospectId, possibleDuplicate.id);
+      await logAgentAction({
+        ctx,
+        agent: "DELIVERY_EXECUTOR_CONTRACTOR",
+        action: "delivery_executor_contractor.possible_duplicate_flagged",
+        entityType: "DeliveryExecutorProspect",
+        entityId: prospectId,
+        details: { possibleDuplicateOfId: possibleDuplicate.id },
+      });
+      return flagged;
+    }
+  }
+
+  return prospect;
+}
+
+/** QUALIFICATION_PENDING -> QUALIFIED. */
+export async function qualifyDeliveryExecutorLead(ctx: AgentContext, prospectId: string): Promise<LifecycleTransitionResult<DeliveryExecutorProspect>> {
+  const result = await transitionDeliveryExecutorLifecycleStage(prospectId, "QUALIFIED");
+  if (!result.deduplicated) {
+    await logAgentAction({ ctx, agent: "DELIVERY_EXECUTOR_CONTRACTOR", action: "delivery_executor_contractor.lead_qualified", entityType: "DeliveryExecutorProspect", entityId: prospectId });
+  }
+  return result;
+}
+
+/** QUALIFICATION_PENDING/CONTACTED/FOLLOW_UP_PENDING -> REJECTED. Reason is
+ * always recorded — spec A: "rejection reason where applicable". */
+export async function rejectDeliveryExecutorLead(ctx: AgentContext, prospectId: string, rejectionReason: string): Promise<LifecycleTransitionResult<DeliveryExecutorProspect>> {
+  const result = await transitionDeliveryExecutorLifecycleStage(prospectId, "REJECTED", { rejectionReason });
+  if (!result.deduplicated) {
+    await logAgentAction({ ctx, agent: "DELIVERY_EXECUTOR_CONTRACTOR", action: "delivery_executor_contractor.lead_rejected", entityType: "DeliveryExecutorProspect", entityId: prospectId, details: { rejectionReason } });
+  }
+  return result;
+}
+
+/** QUALIFIED -> CONTACT_PENDING -> CONTACTED (spec A minimum pipeline). */
+export async function moveDeliveryExecutorToContactPending(ctx: AgentContext, prospectId: string): Promise<LifecycleTransitionResult<DeliveryExecutorProspect>> {
+  return transitionDeliveryExecutorLifecycleStage(prospectId, "CONTACT_PENDING");
+}
+
+export async function markDeliveryExecutorContacted(ctx: AgentContext, prospectId: string): Promise<LifecycleTransitionResult<DeliveryExecutorProspect>> {
+  const result = await transitionDeliveryExecutorLifecycleStage(prospectId, "CONTACTED");
+  if (!result.deduplicated) {
+    await logAgentAction({ ctx, agent: "DELIVERY_EXECUTOR_CONTRACTOR", action: "delivery_executor_contractor.lead_contacted", entityType: "DeliveryExecutorProspect", entityId: prospectId });
+  }
+  return result;
+}
+
+export interface DeliveryExecutorFollowUpParams {
+  channel: Channel;
+  sourceType: DeliveryExecutorSightingInput["sourceType"];
+  sourceRef?: string | null;
+  to: string;
+  text: string;
+  contactFingerprint?: string | null;
+}
+
+/** Bounded, retry-safe, stoppable follow-up (spec F) — delegates every stop
+ * condition (already responded, terminal stage, MAX_FOLLOW_UP_ATTEMPTS) to
+ * the shared src/lib/acquisition/follow-up.ts module rather than
+ * reimplementing the bound here. CONTACTED -> FOLLOW_UP_PENDING advances on
+ * the first real attempt; a second/third attempt is a no-op transition
+ * (already FOLLOW_UP_PENDING). */
+export async function followUpWithDeliveryExecutorProspect(
+  ctx: AgentContext,
+  prospectId: string,
+  params: DeliveryExecutorFollowUpParams,
+): Promise<{ prospect: DeliveryExecutorProspect; outcome: FollowUpOutcome }> {
+  const prospect = await getDeliveryExecutorProspect(prospectId);
+  if (!prospect) throw new ProspectLifecycleNotFoundError(prospectId);
+
+  const hasResponded = prospect.respondedAt != null;
+  const isTerminal = prospect.lifecycleStage !== "CONTACTED" && prospect.lifecycleStage !== "FOLLOW_UP_PENDING";
+
+  const outcome = await sendProspectFollowUp(ctx, {
+    contractorAgent: "DELIVERY_EXECUTOR_CONTRACTOR",
+    prospectType: "DELIVERY_EXECUTOR",
+    prospectRef: prospectId,
+    channel: params.channel,
+    sourceType: params.sourceType,
+    sourceRef: params.sourceRef,
+    to: params.to,
+    text: params.text,
+    contactFingerprint: params.contactFingerprint,
+    idempotencyKey: `delivery-executor-contractor:${prospectId}:follow-up:${prospect.followUpCount + 1}`,
+    hasResponded,
+    isTerminal,
+  });
+
+  if (outcome.skippedReason) {
+    return { prospect, outcome };
+  }
+
+  await transitionDeliveryExecutorLifecycleStage(prospectId, "FOLLOW_UP_PENDING");
+  const updated = await recordDeliveryExecutorFollowUpCounters(prospectId, outcome.attemptNumber);
+
+  return { prospect: updated, outcome };
+}
+
+/** CONTACTED/FOLLOW_UP_PENDING -> RESPONDED. Stamps respondedAt, which
+ * followUpWithDeliveryExecutorProspect / sendProspectFollowUp treat as an
+ * immediate, permanent stop condition for further follow-up. */
+export async function recordDeliveryExecutorResponse(ctx: AgentContext, prospectId: string): Promise<LifecycleTransitionResult<DeliveryExecutorProspect>> {
+  const result = await transitionDeliveryExecutorLifecycleStage(prospectId, "RESPONDED", { respondedAt: new Date() });
+  if (!result.deduplicated) {
+    await logAgentAction({ ctx, agent: "DELIVERY_EXECUTOR_CONTRACTOR", action: "delivery_executor_contractor.lead_responded", entityType: "DeliveryExecutorProspect", entityId: prospectId });
+  }
+  return result;
+}
+
+/** RESPONDED -> HANDOFF_READY. */
+export async function markDeliveryExecutorHandoffReady(ctx: AgentContext, prospectId: string): Promise<LifecycleTransitionResult<DeliveryExecutorProspect>> {
+  const result = await transitionDeliveryExecutorLifecycleStage(prospectId, "HANDOFF_READY");
+  if (!result.deduplicated) {
+    await logAgentAction({ ctx, agent: "DELIVERY_EXECUTOR_CONTRACTOR", action: "delivery_executor_contractor.handoff_ready", entityType: "DeliveryExecutorProspect", entityId: prospectId });
+  }
+  return result;
+}
+
+export interface CompleteDeliveryExecutorHandoffResult {
+  prospect: DeliveryExecutorProspect;
+  deduplicated: boolean;
+  handoff: CreateProspectHandoffResult["handoff"];
+  handoffDeduplicated: boolean;
+}
+
+/** HANDOFF_READY -> HANDED_OFF, alongside the same structured ProspectHandoff
+ * contract every contragent uses (spec G) — only verified/known facts plus
+ * provenance/confidence, never operational authority. Both the ProspectHandoff
+ * creation (idempotencyKey) and the lifecycleStage transition (CAS) are
+ * independently duplicate-safe, so calling this twice for the same prospect
+ * is a safe no-op (spec: duplicate handoff prevention). */
+export async function completeDeliveryExecutorHandoff(
+  ctx: AgentContext,
+  prospectId: string,
+  targetAgentOrDepartment: "SAPAR" | "DELIVERY_OPERATIONS",
+): Promise<CompleteDeliveryExecutorHandoffResult> {
+  const prospect = await getDeliveryExecutorProspect(prospectId);
+  if (!prospect) throw new ProspectLifecycleNotFoundError(prospectId);
+
+  const fingerprint = computeContactFingerprint({ phone: prospect.rawPhone, telegramUsername: prospect.rawTelegramUsername });
+
+  const { handoff, deduplicated: handoffDeduplicated } = await createProspectHandoff(ctx, {
+    prospectType: "DELIVERY_EXECUTOR_SUPPLY",
+    prospectRef: prospectId,
+    sourceAgent: "DELIVERY_EXECUTOR_CONTRACTOR",
+    targetAgentOrDepartment,
+    expressedInterest: "yes",
+    contactData: prospect.rawPhone ?? prospect.rawTelegramUsername ?? "UNKNOWN",
+    requestedService: prospect.executorType ?? prospect.rawVehicleText ?? "UNKNOWN",
+    availableCapabilities: [prospect.serviceAreaText, prospect.rawZonesText].filter((v): v is string => !!v),
+    contactFingerprint: fingerprint,
+    idempotencyKey: `delivery-executor-contractor:${prospectId}:lifecycle-handoff:${targetAgentOrDepartment}`,
+  });
+
+  const { prospect: updated, deduplicated } = await transitionDeliveryExecutorLifecycleStage(prospectId, "HANDED_OFF");
+
+  if (!deduplicated) {
+    await logAgentAction({
+      ctx,
+      agent: "DELIVERY_EXECUTOR_CONTRACTOR",
+      action: "delivery_executor_contractor.lifecycle_handed_off",
+      entityType: "DeliveryExecutorProspect",
+      entityId: prospectId,
+      details: { targetAgentOrDepartment, handoffId: handoff.id },
+    });
+  }
+
+  return { prospect: updated, deduplicated, handoff, handoffDeduplicated };
 }

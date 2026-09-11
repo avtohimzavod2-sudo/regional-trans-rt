@@ -35,6 +35,8 @@ const FORBIDDEN_CALL_SUBSTRINGS = [
   "db.businessProspect.create",
   "db.passenger.create",
   "db.tripRequest.create",
+  "db.cargoCarrierProspect.create",
+  "db.cargoCarrierProspect.update",
   "db.driveCrmEvent.create",
   "db.deliveryCrmEvent.create",
   "db.acquisitionOutreachEvent.create",
