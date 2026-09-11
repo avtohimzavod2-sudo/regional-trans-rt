@@ -110,6 +110,9 @@ describes is worse than none, because people trust it.
   not yet what the code at runtime is permitted to do.
 - Closing a blocker means staffing an owner and regenerating the docs. Editing
   the markdown alone changes nothing.
+- The known weaknesses of this layer, including the ones not repaired, are
+  recorded in `docs/RT_COLD_AUDIT_2026_09.md` (section B), and the
+  `FOUNDER_DECISION_REQUIRED` items in its section C.
 - Deliberately deferred, and tracked as `FOUNDER_DECISION_REQUIRED`: the
   passenger cashier's display name (the node is `PASSENGER_CASHIER` with
   `DISPLAY_NAME_PENDING_FOUNDER_DECISION` — no personal name was invented),

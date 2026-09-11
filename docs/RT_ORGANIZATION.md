@@ -18,6 +18,11 @@ in `src/lib/agents/registry.ts`'s `AGENT_REGISTRY`.
 >   blocks a real launch. It fails closed on UNKNOWN, and a passing test suite
 >   never contributes to a LIVE verdict.
 >
+> Read alongside [`RT_COLD_AUDIT_2026_09.md`](./RT_COLD_AUDIT_2026_09.md),
+> which is hand-written rather than generated and records the known weaknesses
+> of this layer — starting with the fact that it is inert at runtime. Anyone
+> about to rely on the two documents above should read section B first.
+>
 > Where this document and the generated ones disagree, the generated ones are
 > right: they are produced from the code that enforces the rules. Two
 > distinctions they add on purpose:
