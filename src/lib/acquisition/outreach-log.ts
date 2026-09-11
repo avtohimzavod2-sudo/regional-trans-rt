@@ -24,8 +24,10 @@ function summarize(text: string): string {
 }
 
 /** LIVE actually attempts a send; SANDBOX/DRY_RUN never call a real adapter.
- * Missing/unrecognized env is the safe default (DRY_RUN), never LIVE. */
-function resolveOutreachMode(): "LIVE" | "SANDBOX" | "DRY_RUN" {
+ * Missing/unrecognized env is the safe default (DRY_RUN), never LIVE.
+ * Exported (read-only) so an observability/readiness surface can report the
+ * live mode without duplicating this resolution logic. */
+export function resolveOutreachMode(): "LIVE" | "SANDBOX" | "DRY_RUN" {
   const raw = (process.env.ACQUISITION_OUTREACH_MODE ?? "DRY_RUN").toUpperCase();
   return raw === "LIVE" || raw === "SANDBOX" ? raw : "DRY_RUN";
 }
