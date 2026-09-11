@@ -24,6 +24,9 @@ export type GovernanceViolationCode =
   | "MISSING_REPORTS_TO_TARGET"
   | "REPORTING_CYCLE"
   | "NON_MANAGERIAL_REPORTS_TO_TARGET"
+  | "REPORTS_TO_PLANNED_NODE"
+  | "MISSING_PLANNED_REPORTS_TO_TARGET"
+  | "NON_MANAGERIAL_PLANNED_REPORTS_TO_TARGET"
   | "MULTIPLE_ROOTS"
   | "NO_ROOT"
   | "UNOWNED_CAPABILITY"
@@ -34,6 +37,7 @@ export type GovernanceViolationCode =
   | "NON_HUMAN_APPROVER"
   | "MISSING_ESCALATION_TARGET"
   | "SELF_ESCALATION"
+  | "MISSING_PLANNED_ESCALATION_TARGET"
   | "INACTIVE_OWNER_OF_PRE_LIVE_CAPABILITY";
 
 export interface GovernanceViolation {
@@ -97,6 +101,36 @@ export function validateOrgChart(nodes: RtOrgNode[] = RT_ORG_NODES): GovernanceV
         code: "NON_MANAGERIAL_REPORTS_TO_TARGET",
         subject: node.id,
         detail: `reportsTo "${manager.id}" is ${manager.classification}; service-class entities must not be treated as manager nodes`,
+      });
+    }
+
+    // An implemented node managed by a node that does not exist yet is an
+    // accountability hole wearing an org chart. Use plannedReportsTo to
+    // record the intended future manager instead.
+    if (manager.status !== "IMPLEMENTED" && node.status === "IMPLEMENTED") {
+      violations.push({
+        code: "REPORTS_TO_PLANNED_NODE",
+        subject: node.id,
+        detail: `reportsTo "${manager.id}" is PLANNED; an existing node cannot report to a manager that does not exist`,
+      });
+    }
+  }
+
+  for (const node of nodes) {
+    if (!node.plannedReportsTo) continue;
+
+    const planned = get(node.plannedReportsTo);
+    if (!planned) {
+      violations.push({
+        code: "MISSING_PLANNED_REPORTS_TO_TARGET",
+        subject: node.id,
+        detail: `plannedReportsTo "${node.plannedReportsTo}" is not a known org node`,
+      });
+    } else if (!MANAGERIAL_CLASSIFICATIONS.includes(planned.classification)) {
+      violations.push({
+        code: "NON_MANAGERIAL_PLANNED_REPORTS_TO_TARGET",
+        subject: node.id,
+        detail: `plannedReportsTo "${planned.id}" is ${planned.classification}, not a managerial class`,
       });
     }
   }
@@ -221,6 +255,14 @@ export function validateAccountabilityMatrix(input: ValidationInput = {}): Gover
         code: "SELF_ESCALATION",
         subject: cap.capability,
         detail: `escalationTarget equals accountableOwner "${cap.accountableOwner}"`,
+      });
+    }
+
+    if (cap.plannedEscalationTarget && !get(cap.plannedEscalationTarget)) {
+      violations.push({
+        code: "MISSING_PLANNED_ESCALATION_TARGET",
+        subject: cap.capability,
+        detail: `plannedEscalationTarget "${cap.plannedEscalationTarget}" is not a known org node`,
       });
     }
   }

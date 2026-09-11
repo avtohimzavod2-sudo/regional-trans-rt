@@ -248,3 +248,97 @@ describe("validateGovernance against live registry state", () => {
     expect(() => assertGovernanceValid({ nodes })).toThrow(/MISSING_REPORTS_TO_TARGET/);
   });
 });
+
+describe("current vs intended hierarchy", () => {
+  it("rejects an implemented node reporting to a manager that does not exist yet", () => {
+    const nodes = baseNodes();
+    nodes.push({
+      id: "FUTURE_BOSS",
+      displayName: "Future boss",
+      classification: "MANAGER",
+      status: "PLANNED",
+      reportsTo: "FOUNDER",
+    });
+    nodes[2].reportsTo = "FUTURE_BOSS";
+
+    const codes = validateOrgChart(nodes).map((v) => v.code);
+    expect(codes).toContain("REPORTS_TO_PLANNED_NODE");
+  });
+
+  it("allows a planned node to report to another planned node", () => {
+    const nodes = baseNodes();
+    nodes.push(
+      { id: "FUTURE_BOSS", displayName: "FB", classification: "MANAGER", status: "PLANNED", reportsTo: "FOUNDER" },
+      { id: "FUTURE_WORKER", displayName: "FW", classification: "OPERATIONAL_AGENT", status: "PLANNED", reportsTo: "FUTURE_BOSS" },
+    );
+
+    expect(validateOrgChart(nodes)).toEqual([]);
+  });
+
+  it("accepts plannedReportsTo pointing at a planned manager", () => {
+    const nodes = baseNodes();
+    nodes.push({ id: "FUTURE_BOSS", displayName: "FB", classification: "MANAGER", status: "PLANNED", reportsTo: "FOUNDER" });
+    nodes[2].plannedReportsTo = "FUTURE_BOSS";
+
+    expect(validateOrgChart(nodes)).toEqual([]);
+  });
+
+  it("rejects a plannedReportsTo target that does not exist", () => {
+    const nodes = baseNodes();
+    nodes[2].plannedReportsTo = "GHOST";
+
+    const codes = validateOrgChart(nodes).map((v) => v.code);
+    expect(codes).toContain("MISSING_PLANNED_REPORTS_TO_TARGET");
+  });
+
+  it("rejects a service as a plannedReportsTo target", () => {
+    const nodes = baseNodes();
+    nodes[2].plannedReportsTo = "SVC";
+
+    const codes = validateOrgChart(nodes).map((v) => v.code);
+    expect(codes).toContain("NON_MANAGERIAL_PLANNED_REPORTS_TO_TARGET");
+  });
+
+  it("records the intended manager layer without pretending it exists", () => {
+    // Akzhol and Zholaman are referenced across the codebase but have no
+    // module. Every node drawn under them must still report to a real
+    // manager today.
+    const awaiting = RT_ORG_NODES.filter((n) => n.plannedReportsTo);
+    expect(awaiting.length).toBeGreaterThan(0);
+
+    for (const node of awaiting) {
+      const intended = RT_ORG_NODES.find((n) => n.id === node.plannedReportsTo);
+      expect(intended?.status).toBe("PLANNED");
+
+      const current = RT_ORG_NODES.find((n) => n.id === node.reportsTo);
+      expect(current?.status, `${node.id} must report to a real manager today`).toBe("IMPLEMENTED");
+    }
+  });
+});
+
+describe("registry / org chart consistency", () => {
+  it("covers every registered agent in the org chart", () => {
+    const orgIds = new Set(RT_ORG_NODES.map((n) => n.id));
+    const missing = AGENT_REGISTRY.map((a) => String(a.name)).filter((n) => !orgIds.has(n));
+
+    expect(missing).toEqual([]);
+  });
+
+  it("classifies only genuinely LLM-backed modules as reasoning agents", () => {
+    // s.2: the anti-theater check. If this list grows, it must be because a
+    // module really started calling a reasoning provider.
+    const reasoning = RT_ORG_NODES.filter((n) => n.usesLlmReasoning).map((n) => n.id).sort();
+
+    expect(reasoning).toEqual(["ARTUR", "JOLCHU", "MIRA"]);
+  });
+
+  it("never marks a deterministic service or adapter as using LLM reasoning", () => {
+    const misclassified = RT_ORG_NODES.filter(
+      (n) =>
+        n.usesLlmReasoning &&
+        ["DETERMINISTIC_SERVICE", "ADAPTER_WRAPPER", "READ_ONLY_ANALYTICS", "HUMAN_ROLE"].includes(n.classification),
+    );
+
+    expect(misclassified).toEqual([]);
+  });
+});

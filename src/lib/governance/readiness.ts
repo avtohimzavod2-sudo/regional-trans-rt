@@ -81,6 +81,15 @@ function evaluateCapability(cap: RtCapability, nodes: RtOrgNode[]): CapabilityRe
     blockers.push(`accountable owner "${owner.id}" is PLANNED, not implemented`);
   }
 
+  // An escalation path that terminates at a node which does not exist is not
+  // an escalation path.
+  const escalation = nodes.find((n) => n.id === cap.escalationTarget);
+  if (!escalation) {
+    blockers.push(`escalation target "${cap.escalationTarget}" does not exist`);
+  } else if (escalation.status !== "IMPLEMENTED") {
+    blockers.push(`escalation target "${escalation.id}" is PLANNED; escalations have nowhere to go`);
+  }
+
   if (cap.humanApprovalRequired) {
     // A reviewer is never an approver. Only an explicitly named person can
     // satisfy a human-approval requirement.

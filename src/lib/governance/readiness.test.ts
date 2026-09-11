@@ -174,6 +174,17 @@ describe("evaluateReadiness — capability-level rules", () => {
     expect(report.capabilities[0].blockers.join(" ")).toContain("no humanApprover is named");
   });
 
+  it("blocks a capability whose escalation target does not exist yet", () => {
+    const report = evaluateReadiness({
+      nodes,
+      matrix: [cap({ escalationTarget: "TODO" })],
+      attestations: allGatesAttested(),
+    });
+
+    expect(report.capabilities[0].status).toBe("NOT_READY");
+    expect(report.capabilities[0].blockers.join(" ")).toContain("escalations have nowhere to go");
+  });
+
   it("ignores capabilities that are not required before LIVE", () => {
     const report = evaluateReadiness({
       nodes,
@@ -204,6 +215,25 @@ describe("pre-live matrix coverage", () => {
       "launch_readiness_decision",
     ]) {
       expect(preLive.has(required), `${required} must be pre-live gated`).toBe(true);
+    }
+  });
+
+  it("routes every escalation to a node that exists today", () => {
+    for (const cap of RT_ACCOUNTABILITY_MATRIX) {
+      const target = RT_ORG_NODES.find((n) => n.id === cap.escalationTarget);
+      expect(target, `${cap.capability} escalates to unknown ${cap.escalationTarget}`).toBeDefined();
+      expect(target!.status, `${cap.capability} escalates to a node that does not exist`).toBe("IMPLEMENTED");
+    }
+  });
+
+  it("records the intended manager layer separately from today's escalation path", () => {
+    const deferred = RT_ACCOUNTABILITY_MATRIX.filter((c) => c.plannedEscalationTarget);
+    expect(deferred.length).toBeGreaterThan(0);
+
+    for (const cap of deferred) {
+      const planned = RT_ORG_NODES.find((n) => n.id === cap.plannedEscalationTarget);
+      expect(planned?.status).toBe("PLANNED");
+      expect(cap.escalationTarget).not.toBe(cap.plannedEscalationTarget);
     }
   });
 

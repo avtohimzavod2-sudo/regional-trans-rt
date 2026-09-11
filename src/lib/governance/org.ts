@@ -39,8 +39,15 @@ export interface RtOrgNode {
   displayName: string;
   classification: RtNodeClassification;
   status: RtNodeStatus;
-  /** Accountability parent. Exactly one node (FOUNDER) may have null. */
+  /** CURRENT accountability parent — who answers for this node today.
+   * Must point at an IMPLEMENTED node: you cannot report to someone who does
+   * not exist. Exactly one node (FOUNDER) may have null. */
   reportsTo: string | null;
+  /** INTENDED accountability parent once a planned manager is built. Kept
+   * separate from `reportsTo` on purpose: an org chart that shows the
+   * structure RT wants, while a node is really managed by someone else, is a
+   * lie that hides an accountability gap. */
+  plannedReportsTo?: string;
   /** True only where the module really calls an LLM reasoning provider. */
   usesLlmReasoning?: boolean;
   notes?: string;
@@ -170,17 +177,19 @@ export const RT_ORG_NODES: RtOrgNode[] = [
     displayName: "Mira — public customer communication",
     classification: "OPERATIONAL_AGENT",
     status: "IMPLEMENTED",
-    reportsTo: "AKZHOL",
+    reportsTo: "ARTUR",
+    plannedReportsTo: "AKZHOL",
     usesLlmReasoning: true,
     notes:
-      "RT's ONLY public persona. reportsTo moves from ARTUR to AKZHOL now that passenger operations has a manager layer; Artur remains the escalation path above Akzhol.",
+      "RT's ONLY public persona. Managed directly by Artur today; moves under Akzhol once that manager actually exists.",
   },
   {
     id: "JOLCHU",
     displayName: "Jolchu — real-world geography, ETA, traffic, last mile",
     classification: "OPERATIONAL_AGENT",
     status: "IMPLEMENTED",
-    reportsTo: "AKZHOL",
+    reportsTo: "ARTUR",
+    plannedReportsTo: "AKZHOL",
     usesLlmReasoning: true,
     notes: "Sole external-geography truth source. Must never compute fares (s.15).",
   },
@@ -189,7 +198,8 @@ export const RT_ORG_NODES: RtOrgNode[] = [
     displayName: "Sapar — cargo/delivery operations",
     classification: "OPERATIONAL_AGENT",
     status: "IMPLEMENTED",
-    reportsTo: "ZHOLAMAN",
+    reportsTo: "ARTUR",
+    plannedReportsTo: "ZHOLAMAN",
     notes: "Deterministic today. Owns shipment execution and executor assignment.",
   },
   {
@@ -197,7 +207,8 @@ export const RT_ORG_NODES: RtOrgNode[] = [
     displayName: "RT Office — supply/demand intelligence & passenger-driver loop",
     classification: "OPERATIONAL_AGENT",
     status: "IMPLEMENTED",
-    reportsTo: "AKZHOL",
+    reportsTo: "ARTUR",
+    plannedReportsTo: "AKZHOL",
     notes: "Authoritative computeMarketGap(). Must never bypass MATCH.",
   },
 
@@ -226,7 +237,8 @@ export const RT_ORG_NODES: RtOrgNode[] = [
     displayName: "Match — authoritative matching engine",
     classification: "DETERMINISTIC_SERVICE",
     status: "IMPLEMENTED",
-    reportsTo: "AKZHOL",
+    reportsTo: "ARTUR",
+    plannedReportsTo: "AKZHOL",
     notes:
       "Sole matching authority. No reasoning; pure selection logic. RT Office CALLS Match but does not manage it — that edge is a technical dependency, not accountability.",
   },
@@ -235,7 +247,8 @@ export const RT_ORG_NODES: RtOrgNode[] = [
     displayName: "Route — internal corridor topology",
     classification: "DETERMINISTIC_SERVICE",
     status: "IMPLEMENTED",
-    reportsTo: "AKZHOL",
+    reportsTo: "ARTUR",
+    plannedReportsTo: "AKZHOL",
     notes: "Internal RT topology only. No geocoding, no ETA — that is Jolchu (s.3.A).",
   },
   {
@@ -267,7 +280,8 @@ export const RT_ORG_NODES: RtOrgNode[] = [
     displayName: "Support — service recovery",
     classification: "DETERMINISTIC_SERVICE",
     status: "IMPLEMENTED",
-    reportsTo: "AKZHOL",
+    reportsTo: "ARTUR",
+    plannedReportsTo: "AKZHOL",
     notes: "Non-adjudicative. Disputes escalate to Adilet (s.3.B).",
   },
   {
@@ -275,7 +289,8 @@ export const RT_ORG_NODES: RtOrgNode[] = [
     displayName: "Parcel — passenger-corridor small parcel lifecycle",
     classification: "DETERMINISTIC_SERVICE",
     status: "IMPLEMENTED",
-    reportsTo: "ZHOLAMAN",
+    reportsTo: "ARTUR",
+    plannedReportsTo: "ZHOLAMAN",
     notes: "s.3.E: narrow product (parcel riding a passenger vehicle), distinct from Sapar shipments.",
   },
   {
@@ -283,7 +298,8 @@ export const RT_ORG_NODES: RtOrgNode[] = [
     displayName: "Network — partner registry CRUD",
     classification: "DETERMINISTIC_SERVICE",
     status: "IMPLEMENTED",
-    reportsTo: "ZHOLAMAN",
+    reportsTo: "ARTUR",
+    plannedReportsTo: "ZHOLAMAN",
     notes: "CRUD, not an autonomous agent. Verification of partners is a separate gate (s.26).",
   },
   {
@@ -291,7 +307,8 @@ export const RT_ORG_NODES: RtOrgNode[] = [
     displayName: "CRM Auto — Drive CRM append-only event log",
     classification: "DETERMINISTIC_SERVICE",
     status: "IMPLEMENTED",
-    reportsTo: "AKZHOL",
+    reportsTo: "ARTUR",
+    plannedReportsTo: "AKZHOL",
     notes: "Sole Drive CRM writer. Must never become a general orchestrator.",
   },
   {
@@ -299,8 +316,10 @@ export const RT_ORG_NODES: RtOrgNode[] = [
     displayName: "SideEffectGateway — external send boundary",
     classification: "DETERMINISTIC_SERVICE",
     status: "IMPLEMENTED",
-    reportsTo: "HUMAN_RELIABILITY_OWNER",
-    notes: "messaging/* scenario gate + MIRA_OUTBOUND_MODE. Blocks real sends in test/scenario contexts.",
+    reportsTo: "FOUNDER",
+    plannedReportsTo: "HUMAN_RELIABILITY_OWNER",
+    notes:
+      "messaging/* scenario gate + MIRA_OUTBOUND_MODE. Blocks real sends in test/scenario contexts. Until a reliability owner is named, RT's most safety-critical control reports directly to the Founder — deliberately recorded rather than hidden under a manager who does not exist.",
   },
   {
     id: "TARIFF_ENGINE",
@@ -335,7 +354,8 @@ export const RT_ORG_NODES: RtOrgNode[] = [
     displayName: "Scout — driver discovery & fingerprinting",
     classification: "BACKGROUND_INTELLIGENCE",
     status: "IMPLEMENTED",
-    reportsTo: "AKZHOL",
+    reportsTo: "ARTUR",
+    plannedReportsTo: "AKZHOL",
     notes: "Intelligence signal, NOT identity verification (s.14).",
   },
 
@@ -355,7 +375,8 @@ export const RT_ORG_NODES: RtOrgNode[] = [
     displayName: "Driver acquisition contractor",
     classification: "OPERATIONAL_AGENT",
     status: "IMPLEMENTED",
-    reportsTo: "AKZHOL",
+    reportsTo: "ARTUR",
+    plannedReportsTo: "AKZHOL",
     notes: "Acquires only; operational involvement ends at accepted handoff (s.25).",
   },
   {
@@ -363,7 +384,8 @@ export const RT_ORG_NODES: RtOrgNode[] = [
     displayName: "Passenger acquisition contractor",
     classification: "OPERATIONAL_AGENT",
     status: "IMPLEMENTED",
-    reportsTo: "AKZHOL",
+    reportsTo: "ARTUR",
+    plannedReportsTo: "AKZHOL",
     notes: "Acquires only; operational involvement ends at accepted handoff (s.25).",
   },
   {
@@ -371,7 +393,8 @@ export const RT_ORG_NODES: RtOrgNode[] = [
     displayName: "Business customer acquisition contractor",
     classification: "OPERATIONAL_AGENT",
     status: "IMPLEMENTED",
-    reportsTo: "ZHOLAMAN",
+    reportsTo: "ARTUR",
+    plannedReportsTo: "ZHOLAMAN",
     notes: "Acquires only; operational involvement ends at accepted handoff (s.25).",
   },
   {
@@ -379,7 +402,8 @@ export const RT_ORG_NODES: RtOrgNode[] = [
     displayName: "Delivery executor acquisition contractor",
     classification: "OPERATIONAL_AGENT",
     status: "IMPLEMENTED",
-    reportsTo: "ZHOLAMAN",
+    reportsTo: "ARTUR",
+    plannedReportsTo: "ZHOLAMAN",
     notes: "Acquires only; operational involvement ends at accepted handoff (s.25).",
   },
   {
@@ -387,7 +411,8 @@ export const RT_ORG_NODES: RtOrgNode[] = [
     displayName: "Cargo carrier acquisition contractor",
     classification: "OPERATIONAL_AGENT",
     status: "IMPLEMENTED",
-    reportsTo: "ZHOLAMAN",
+    reportsTo: "ARTUR",
+    plannedReportsTo: "ZHOLAMAN",
     notes: "Acquires only; operational involvement ends at accepted handoff (s.25).",
   },
 
@@ -397,7 +422,8 @@ export const RT_ORG_NODES: RtOrgNode[] = [
     displayName: "RT Command — inbound routing wrapper",
     classification: "ADAPTER_WRAPPER",
     status: "IMPLEMENTED",
-    reportsTo: "AKZHOL",
+    reportsTo: "ARTUR",
+    plannedReportsTo: "AKZHOL",
     notes:
       "decideRoute() is deterministic routing; not an autonomous employee. It delegates INTO Mira, but Mira is a peer operational agent, not its manager.",
   },
@@ -406,7 +432,8 @@ export const RT_ORG_NODES: RtOrgNode[] = [
     displayName: "Passenger ingest wrapper",
     classification: "ADAPTER_WRAPPER",
     status: "IMPLEMENTED",
-    reportsTo: "AKZHOL",
+    reportsTo: "ARTUR",
+    plannedReportsTo: "AKZHOL",
     notes: "38-line thin wrapper over ingestPassengerMessage. Documented honestly per s.2.",
   },
   {
@@ -414,7 +441,8 @@ export const RT_ORG_NODES: RtOrgNode[] = [
     displayName: "Driver ingest wrapper",
     classification: "ADAPTER_WRAPPER",
     status: "IMPLEMENTED",
-    reportsTo: "AKZHOL",
+    reportsTo: "ARTUR",
+    plannedReportsTo: "AKZHOL",
     notes: "39-line thin wrapper over ingestDriverPrivateMessage. Documented honestly per s.2.",
   },
 ];
