@@ -1,5 +1,6 @@
 import Link from "next/link";
 import LogoutButton from "../logout-button";
+import { RtModeIndicator } from "../rt-mode-indicator";
 
 export default function DispatcherLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -82,7 +83,10 @@ export default function DispatcherLayout({ children }: { children: React.ReactNo
             </Link>
           </nav>
         </div>
-        <LogoutButton />
+        <div className="flex items-center gap-4">
+          <RtModeIndicator />
+          <LogoutButton />
+        </div>
       </header>
       <main className="p-6">{children}</main>
     </div>
