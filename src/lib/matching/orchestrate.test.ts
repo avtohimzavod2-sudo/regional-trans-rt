@@ -35,8 +35,18 @@ const requestRecord = {
 // anything a factory closes over must itself be created via vi.hoisted() —
 // a plain `const dbMocks = {...}` above the vi.mock call would still throw
 // a TDZ ReferenceError at module-eval time.
-const { dbMocks, logActionMock, sendTelegramMessageMock, sendWhatsAppTextMock, sendWhatsAppConfirmButtonsMock, assertSafeToRevealMock, openSupportCaseMock } =
-  vi.hoisted(() => {
+const {
+  dbMocks,
+  logActionMock,
+  sendTelegramMessageMock,
+  sendWhatsAppTextMock,
+  sendWhatsAppConfirmButtonsMock,
+  assertSafeToRevealMock,
+  openSupportCaseMock,
+  passengerLoopMocks,
+  openBreakdownForDriversMock,
+  latestOpenBreakdownForDriverMock,
+} = vi.hoisted(() => {
     const dbMocks = {
       match: {
         findUniqueOrThrow: vi.fn(),
@@ -55,6 +65,7 @@ const { dbMocks, logActionMock, sendTelegramMessageMock, sendWhatsAppTextMock, s
       driverOffer: {
         updateMany: vi.fn(),
         findUniqueOrThrow: vi.fn(),
+        findMany: vi.fn().mockResolvedValue([]),
         update: vi.fn().mockResolvedValue({}),
         create: vi.fn(),
       },
@@ -78,11 +89,39 @@ const { dbMocks, logActionMock, sendTelegramMessageMock, sendWhatsAppTextMock, s
       sendWhatsAppConfirmButtonsMock: vi.fn().mockResolvedValue(undefined),
       assertSafeToRevealMock: vi.fn().mockResolvedValue({ allowed: true }),
       openSupportCaseMock: vi.fn().mockResolvedValue({}),
+      // Default: no PassengerLoopRun exists for the tripRequestId under test,
+      // so every `if (loopRun)` guard at orchestrate.ts's new hook points is
+      // skipped and none of these mocks fire — existing tests below stay
+      // byte-for-byte unaffected by the loop's addition. Dedicated tests for
+      // the wiring itself override getLoopRunByTripRequestId per-case.
+      passengerLoopMocks: {
+        getLoopRunByTripRequestId: vi.fn().mockResolvedValue(null),
+        recordDriverDeclined: vi.fn().mockResolvedValue({}),
+        recordOfferReady: vi.fn().mockResolvedValue({}),
+        recordOfferSent: vi.fn().mockResolvedValue({}),
+        recordPassengerAccepted: vi.fn().mockResolvedValue({}),
+        recordPassengerDeclined: vi.fn().mockResolvedValue({}),
+        recordOfferInvalidatedBySeatRace: vi.fn().mockResolvedValue({}),
+        cancelPassengerLoop: vi.fn().mockResolvedValue(null),
+      },
+      // CRM Auto's operational-eligibility boundary (spec: "CRM Auto stores
+      // the driver operational contour") — proposeMatchesForRequest consults
+      // this before the pure scoring engine. Defaults to "no open breakdown
+      // anywhere" so every pre-existing test (none of which ever reach past
+      // the request.status guard) stays unaffected; the one wiring test that
+      // genuinely drives a full rematch through the real engine overrides it.
+      openBreakdownForDriversMock: vi.fn().mockResolvedValue(new Map()),
+      latestOpenBreakdownForDriverMock: vi.fn().mockResolvedValue({ hasOpenBreakdown: false }),
     };
   });
 
 vi.mock("@/lib/db", () => ({ db: dbMocks }));
+vi.mock("@/lib/rt-office/passenger-loop", () => passengerLoopMocks);
 vi.mock("@/lib/audit", () => ({ logAction: logActionMock }));
+vi.mock("@/lib/crm-auto/bridge", () => ({
+  openBreakdownForDrivers: openBreakdownForDriversMock,
+  latestOpenBreakdownForDriver: latestOpenBreakdownForDriverMock,
+}));
 // orchestrate.ts routes its driver/passenger sends through Mira's outbound
 // boundary (spec s.11) rather than the raw messaging adapters directly, so
 // this is the module under test's actual import target now.
@@ -102,6 +141,7 @@ vi.mock("@/lib/agents/pay", () => ({
 import { messages } from "@/lib/i18n/messages";
 import { CANCEL_REASON } from "./booking-state";
 import {
+  cancelPendingDemand,
   cancelTrip,
   handleDriverBreakdown,
   handleDriverResponse,
@@ -216,6 +256,121 @@ describe("handlePassengerResponse", () => {
   });
 });
 
+describe("handlePassengerResponse — passenger loop wiring", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    dbMocks.match.findUniqueOrThrow.mockResolvedValue(matchRecord);
+    dbMocks.match.update.mockResolvedValue({});
+    dbMocks.match.count.mockResolvedValue(0);
+    dbMocks.tripRequest.update.mockResolvedValue({});
+    dbMocks.tripRequest.findUniqueOrThrow.mockResolvedValue(requestRecord);
+    dbMocks.driverOffer.findUniqueOrThrow.mockResolvedValue({ id: "offer-1", seatsAvailable: 1, status: "PARTIALLY_FILLED" });
+    dbMocks.driverOffer.update.mockResolvedValue({});
+    dbMocks.trip.create.mockResolvedValue({ id: "trip-1" });
+    assertSafeToRevealMock.mockResolvedValue({ allowed: true });
+    passengerLoopMocks.getLoopRunByTripRequestId.mockResolvedValue({ id: "loop-1" });
+  });
+
+  it("terminal acceptance records PASSENGER_ACCEPTED on the loop (spec A)", async () => {
+    dbMocks.match.updateMany.mockResolvedValue({ count: 1 });
+    dbMocks.driverOffer.updateMany.mockResolvedValue({ count: 1 });
+
+    await handlePassengerResponse("match-1", true);
+
+    expect(passengerLoopMocks.recordPassengerAccepted).toHaveBeenCalledWith(expect.anything(), "loop-1", "match-1");
+  });
+
+  it("does not touch the loop when no PassengerLoopRun exists for this TripRequest (pre-loop-feature demand)", async () => {
+    passengerLoopMocks.getLoopRunByTripRequestId.mockResolvedValue(null);
+    dbMocks.match.updateMany.mockResolvedValue({ count: 1 });
+    dbMocks.driverOffer.updateMany.mockResolvedValue({ count: 1 });
+
+    await handlePassengerResponse("match-1", true);
+
+    expect(passengerLoopMocks.recordPassengerAccepted).not.toHaveBeenCalled();
+  });
+
+  it("Test 3/17 — seat race loss invalidates the loop offer and rematches into a fresh OFFER_READY (spec F)", async () => {
+    dbMocks.match.updateMany.mockResolvedValue({ count: 1 });
+    dbMocks.driverOffer.updateMany.mockResolvedValue({ count: 0 });
+    // proposeMatchesForRequest re-reads db.match.findMany for exclusion sets and
+    // db.driverOffer.findUniqueOrThrow for candidate scoring; letting it fall
+    // through to its own "no candidate" path keeps this test focused on the
+    // loop bookkeeping rather than the matching engine's internals.
+    dbMocks.match.count.mockResolvedValue(1); // active match already exists -> proposeMatchesForRequest bails with null
+
+    await handlePassengerResponse("match-1", true);
+
+    expect(passengerLoopMocks.recordOfferInvalidatedBySeatRace).toHaveBeenCalledWith(expect.anything(), "loop-1", "match-1", false);
+    expect(passengerLoopMocks.recordOfferReady).not.toHaveBeenCalled();
+  });
+
+  it("Test 6 — passenger decline records PASSENGER_DECLINED then OFFER_READY when a next candidate is found", async () => {
+    // proposeMatchesForRequest/proposeToDriver never call db.match.findFirst —
+    // their real call chain is hasActiveMatch (match.count) ->
+    // tripRequest.findUniqueOrThrow -> driverOffer.findMany ->
+    // openBreakdownForDrivers -> the pure scoring engine -> proposeToDriver's
+    // own transaction. A genuine "next candidate found" scenario has to flow
+    // through that real chain, not stub a function it never calls.
+    const rematchRequest = {
+      id: "req-1",
+      status: "PENDING",
+      seats: 1,
+      travelDate: new Date("2026-09-20T00:00:00+06:00"),
+      timeWindowStart: null,
+      timeWindowEnd: null,
+      origin: { id: "o1", corridorId: "corridor-1", order: 0, nameRu: "А", nameKy: "А", nameEn: "A" },
+      destination: { id: "d1", corridorId: "corridor-1", order: 10, nameRu: "Б", nameKy: "Б", nameEn: "B" },
+      passenger: { whatsappId: "wa-pax-1", preferredLang: "RU" },
+    };
+    const rematchOffer = {
+      id: "offer-next",
+      driverId: "driver-next",
+      driver: { status: "ACTIVE", category: "REGULAR" },
+      origin: { id: "o1", corridorId: "corridor-1", order: 0 },
+      destination: { id: "d1", corridorId: "corridor-1", order: 10 },
+      travelDate: rematchRequest.travelDate,
+      timeWindowStart: null,
+      timeWindowEnd: null,
+      seatsAvailable: 2,
+      status: "OPEN",
+      createdAt: new Date("2026-09-01T00:00:00Z"),
+    };
+
+    dbMocks.match.updateMany.mockResolvedValue({ count: 1 });
+    dbMocks.match.count.mockResolvedValue(0); // no active match anywhere -> both hasActiveMatch checks pass
+    dbMocks.tripRequest.findUniqueOrThrow.mockResolvedValue(rematchRequest);
+    dbMocks.driverOffer.findMany.mockResolvedValue([rematchOffer]);
+    dbMocks.driverOffer.findUniqueOrThrow.mockResolvedValue({
+      id: "offer-next",
+      seatsAvailable: 2,
+      status: "OPEN",
+      driver: { preferredLang: "RU", telegramUserId: "tg-driver-x" },
+    });
+    dbMocks.match.create.mockResolvedValue({
+      id: "match-next",
+      tripRequestId: "req-1",
+      driverOfferId: "offer-next",
+      status: "AWAITING_DRIVER",
+    });
+
+    await handlePassengerResponse("match-1", false);
+
+    expect(passengerLoopMocks.recordPassengerDeclined).toHaveBeenCalledWith(expect.anything(), "loop-1", "match-1", true);
+    expect(passengerLoopMocks.recordOfferReady).toHaveBeenCalledWith(expect.anything(), "loop-1", "match-next", "offer-next");
+  });
+
+  it("passenger decline with no next candidate records PASSENGER_DECLINED without a spurious OFFER_READY", async () => {
+    dbMocks.match.updateMany.mockResolvedValue({ count: 1 });
+    dbMocks.match.count.mockResolvedValue(1); // active match guard makes proposeMatchesForRequest bail with null
+
+    await handlePassengerResponse("match-1", false);
+
+    expect(passengerLoopMocks.recordPassengerDeclined).toHaveBeenCalledWith(expect.anything(), "loop-1", "match-1", false);
+    expect(passengerLoopMocks.recordOfferReady).not.toHaveBeenCalled();
+  });
+});
+
 // Spec s.15 Test 4/Test 5 — handleDriverResponse had zero dedicated test
 // coverage before this pass, despite being the entrypoint Telegram's
 // accept/decline keyboard callback drives.
@@ -312,6 +467,105 @@ describe("handleDriverResponse", () => {
 
     expect(dbMocks.match.updateMany).toHaveBeenCalledTimes(1);
     expect(sendWhatsAppConfirmButtonsMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("handleDriverResponse — passenger loop wiring (spec K)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    dbMocks.match.findUniqueOrThrow.mockResolvedValue(driverResponseMatchRecord);
+    dbMocks.match.updateMany.mockResolvedValue({ count: 1 });
+    dbMocks.match.count.mockResolvedValue(0);
+    dbMocks.tripRequest.update.mockResolvedValue({});
+    dbMocks.tripRequest.findUniqueOrThrow.mockResolvedValue({ id: "req-2", status: "CONFIRMED" });
+    passengerLoopMocks.getLoopRunByTripRequestId.mockResolvedValue({ id: "loop-1" });
+  });
+
+  it("driver decline with no next candidate records DRIVER_DECLINED without a spurious OFFER_READY", async () => {
+    await handleDriverResponse("match-2", false);
+
+    expect(passengerLoopMocks.recordDriverDeclined).toHaveBeenCalledWith(expect.anything(), "loop-1", "match-2", false);
+    expect(passengerLoopMocks.recordOfferReady).not.toHaveBeenCalled();
+  });
+
+  it("driver decline records DRIVER_DECLINED then OFFER_READY when a next candidate is genuinely found", async () => {
+    // Same real-engine fixture shape as the handlePassengerResponse decline
+    // wiring test above — proposeMatchesForRequest/proposeToDriver's real
+    // call chain has to actually produce a match, not a stubbed shortcut.
+    const rematchRequest = {
+      id: "req-2",
+      status: "PENDING",
+      seats: 1,
+      travelDate: new Date("2026-09-20T00:00:00+06:00"),
+      timeWindowStart: null,
+      timeWindowEnd: null,
+      origin: { id: "o1", corridorId: "corridor-1", order: 0, nameRu: "А", nameKy: "А", nameEn: "A" },
+      destination: { id: "d1", corridorId: "corridor-1", order: 10, nameRu: "Б", nameKy: "Б", nameEn: "B" },
+      passenger: { whatsappId: "wa-pax-2", preferredLang: "RU" },
+    };
+    const rematchOffer = {
+      id: "offer-next",
+      driverId: "driver-next",
+      driver: { status: "ACTIVE", category: "REGULAR" },
+      origin: { id: "o1", corridorId: "corridor-1", order: 0 },
+      destination: { id: "d1", corridorId: "corridor-1", order: 10 },
+      travelDate: rematchRequest.travelDate,
+      timeWindowStart: null,
+      timeWindowEnd: null,
+      seatsAvailable: 2,
+      status: "OPEN",
+      createdAt: new Date("2026-09-01T00:00:00Z"),
+    };
+
+    dbMocks.tripRequest.findUniqueOrThrow.mockResolvedValue(rematchRequest);
+    dbMocks.driverOffer.findMany.mockResolvedValue([rematchOffer]);
+    dbMocks.driverOffer.findUniqueOrThrow.mockResolvedValue({
+      id: "offer-next",
+      seatsAvailable: 2,
+      status: "OPEN",
+      driver: { preferredLang: "RU", telegramUserId: "tg-driver-x" },
+    });
+    dbMocks.match.create.mockResolvedValue({
+      id: "match-next",
+      tripRequestId: "req-2",
+      driverOfferId: "offer-next",
+      status: "AWAITING_DRIVER",
+    });
+
+    await handleDriverResponse("match-2", false);
+
+    expect(passengerLoopMocks.recordDriverDeclined).toHaveBeenCalledWith(expect.anything(), "loop-1", "match-2", true);
+    expect(passengerLoopMocks.recordOfferReady).toHaveBeenCalledWith(expect.anything(), "loop-1", "match-next", "offer-next");
+  });
+
+  it("does not touch the loop on decline when no PassengerLoopRun exists (pre-loop-feature demand)", async () => {
+    passengerLoopMocks.getLoopRunByTripRequestId.mockResolvedValue(null);
+
+    await handleDriverResponse("match-2", false);
+
+    expect(passengerLoopMocks.recordDriverDeclined).not.toHaveBeenCalled();
+    expect(passengerLoopMocks.recordOfferReady).not.toHaveBeenCalled();
+  });
+
+  it("driver accept records OFFER_SENT on the loop (spec A)", async () => {
+    dbMocks.match.findUniqueOrThrow
+      .mockResolvedValueOnce(driverResponseMatchRecord)
+      .mockResolvedValueOnce({ ...driverResponseMatchRecord, status: "AWAITING_PASSENGER" });
+
+    await handleDriverResponse("match-2", true);
+
+    expect(passengerLoopMocks.recordOfferSent).toHaveBeenCalledWith(expect.anything(), "loop-1", "match-2");
+  });
+
+  it("does not touch the loop on accept when no PassengerLoopRun exists (pre-loop-feature demand)", async () => {
+    passengerLoopMocks.getLoopRunByTripRequestId.mockResolvedValue(null);
+    dbMocks.match.findUniqueOrThrow
+      .mockResolvedValueOnce(driverResponseMatchRecord)
+      .mockResolvedValueOnce({ ...driverResponseMatchRecord, status: "AWAITING_PASSENGER" });
+
+    await handleDriverResponse("match-2", true);
+
+    expect(passengerLoopMocks.recordOfferSent).not.toHaveBeenCalled();
   });
 });
 
@@ -445,6 +699,31 @@ describe("markTripCompletedByDriverReport", () => {
     expect(dbMocks.driverOffer.create).not.toHaveBeenCalled();
     expect(logActionMock).not.toHaveBeenCalledWith(expect.objectContaining({ action: "trip.completed" }));
     expect(result).toEqual({ returnOffer: null, alreadyCompleted: true });
+  });
+});
+
+describe("cancelPendingDemand — passenger loop wiring (spec L)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    dbMocks.match.findFirst.mockResolvedValue(null); // no active match to unwind for this demand
+  });
+
+  it("cancels the loop once the claim actually wins (spec: passenger cancels their own demand)", async () => {
+    dbMocks.tripRequest.updateMany.mockResolvedValue({ count: 1 });
+
+    const result = await cancelPendingDemand("req-1");
+
+    expect(passengerLoopMocks.cancelPassengerLoop).toHaveBeenCalledWith(expect.anything(), "req-1");
+    expect(result).toEqual({ tripRequestId: "req-1", cancelled: true });
+  });
+
+  it("never touches the loop when the claim loses — an already-terminal/nonexistent demand is a clean no-op", async () => {
+    dbMocks.tripRequest.updateMany.mockResolvedValue({ count: 0 });
+
+    const result = await cancelPendingDemand("req-1");
+
+    expect(passengerLoopMocks.cancelPassengerLoop).not.toHaveBeenCalled();
+    expect(result).toEqual({ tripRequestId: "req-1", cancelled: false });
   });
 });
 

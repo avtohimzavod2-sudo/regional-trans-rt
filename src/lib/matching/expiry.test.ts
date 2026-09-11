@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // boundary are all fully mocked, and proposeMatchesForRequest (re-matching)
 // is mocked separately since it is exercised by orchestrate.test.ts already.
 
-const { dbMocks, logActionMock, notifyDriverPrivatelyMock, notifyPassengerTextMock, proposeMatchesForRequestMock } = vi.hoisted(() => ({
+const { dbMocks, logActionMock, notifyDriverPrivatelyMock, notifyPassengerTextMock, proposeMatchesForRequestMock, passengerLoopMocks } = vi.hoisted(() => ({
   dbMocks: {
     match: {
       findMany: vi.fn().mockResolvedValue([]),
@@ -21,6 +21,14 @@ const { dbMocks, logActionMock, notifyDriverPrivatelyMock, notifyPassengerTextMo
   notifyDriverPrivatelyMock: vi.fn().mockResolvedValue(undefined),
   notifyPassengerTextMock: vi.fn().mockResolvedValue(undefined),
   proposeMatchesForRequestMock: vi.fn(),
+  // Default: no PassengerLoopRun exists for the tripRequestId under test, so
+  // expiry.ts's `if (loopRun)` guard is skipped — existing tests stay
+  // unaffected by the loop's addition.
+  passengerLoopMocks: {
+    getLoopRunByTripRequestId: vi.fn().mockResolvedValue(null),
+    recordOfferExpired: vi.fn().mockResolvedValue({}),
+    recordOfferReady: vi.fn().mockResolvedValue({}),
+  },
 }));
 
 vi.mock("@/lib/db", () => ({ db: dbMocks }));
@@ -30,6 +38,7 @@ vi.mock("@/lib/mira/outbound", () => ({
   notifyPassengerText: notifyPassengerTextMock,
 }));
 vi.mock("./orchestrate", () => ({ proposeMatchesForRequest: proposeMatchesForRequestMock }));
+vi.mock("@/lib/rt-office/passenger-loop", () => passengerLoopMocks);
 
 import { messages } from "@/lib/i18n/messages";
 import { expireStaleMatches } from "./expiry";
@@ -137,5 +146,35 @@ describe("expireStaleMatches", () => {
     expect(notifyDriverPrivatelyMock).not.toHaveBeenCalled();
     expect(notifyPassengerTextMock).not.toHaveBeenCalled();
     expect(proposeMatchesForRequestMock).not.toHaveBeenCalled();
+  });
+
+  // Passenger loop wiring (spec E — stale offer expiry) — the default
+  // getLoopRunByTripRequestId() -> null above keeps every test up to here
+  // byte-for-byte unaffected by the loop's addition; these two cases
+  // exercise the `if (loopRun)` branch itself for both timeout kinds.
+  it("records OFFER_EXPIRED then OFFER_READY on the loop when a driver-side timeout finds a next candidate", async () => {
+    dbMocks.match.findMany.mockImplementation((args: { where: { status: string } }) =>
+      args.where.status === "AWAITING_DRIVER" ? [driverAwaitingMatch] : [],
+    );
+    passengerLoopMocks.getLoopRunByTripRequestId.mockResolvedValue({ id: "loop-1" });
+    proposeMatchesForRequestMock.mockResolvedValue({ id: "next-match", driverOfferId: "next-offer" });
+
+    await expireStaleMatches();
+
+    expect(passengerLoopMocks.recordOfferExpired).toHaveBeenCalledWith(expect.anything(), "loop-1", "match-driver-1", true);
+    expect(passengerLoopMocks.recordOfferReady).toHaveBeenCalledWith(expect.anything(), "loop-1", "next-match", "next-offer");
+  });
+
+  it("records OFFER_EXPIRED without OFFER_READY on a passenger-side timeout when no next candidate remains", async () => {
+    dbMocks.match.findMany.mockImplementation((args: { where: { status: string } }) =>
+      args.where.status === "AWAITING_PASSENGER" ? [passengerAwaitingMatch] : [],
+    );
+    passengerLoopMocks.getLoopRunByTripRequestId.mockResolvedValue({ id: "loop-2" });
+    proposeMatchesForRequestMock.mockResolvedValue(null);
+
+    await expireStaleMatches();
+
+    expect(passengerLoopMocks.recordOfferExpired).toHaveBeenCalledWith(expect.anything(), "loop-2", "match-passenger-1", false);
+    expect(passengerLoopMocks.recordOfferReady).not.toHaveBeenCalled();
   });
 });

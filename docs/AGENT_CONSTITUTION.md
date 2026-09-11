@@ -77,18 +77,49 @@ weakened by Artur's introduction (spec s.4):
   visibility into RT OFFICE / Drive CRM (below) is read-only the same way.
 - **RT OFFICE** — converts RT Core's existing Driver/DriverOffer/Match/Trip
   state and CRM Auto's DriveCrmEvent log into verified, never-invented
-  supply facts for Mira to phrase to a passenger. It owns no Prisma model
-  and no exclusive capability: every write it triggers flows through the
-  existing matching engine (`src/lib/matching/orchestrate.ts` via
-  `src/lib/agents/match.ts`), never a second matching engine or a direct
-  write to DriverOffer/Match/Trip. Its read path is exclusion-aware for the
-  same reason: `resolveDemandAgainstSupply` (`src/lib/rt-office/facts.ts`)
-  calls `matching/orchestrate.ts`'s exported `excludedOfferIdsForRequest` —
-  the exact function `proposeMatchesForRequest` itself uses — so RT OFFICE
-  can never describe an offer to a passenger that the driver has already
+  supply facts for Mira to phrase to a passenger. It owns no exclusive
+  capability: every write it triggers flows through the existing matching
+  engine (`src/lib/matching/orchestrate.ts` via `src/lib/agents/match.ts`),
+  never a second matching engine or a direct write to DriverOffer/Match/Trip.
+  Its read path is exclusion-aware for the same reason:
+  `resolveDemandAgainstSupply` (`src/lib/rt-office/facts.ts`) calls
+  `matching/orchestrate.ts`'s exported `excludedOfferIdsForRequest` — the
+  exact function `proposeMatchesForRequest` itself uses — so RT OFFICE can
+  never describe an offer to a passenger that the driver has already
   declined for their request. It is never a second public persona —
   `src/lib/rt-office/boundary.test.ts` statically forbids it from importing
   any external-comms/payment function or writing those tables directly.
+  - **The end-to-end passenger↔driver operational loop** (Мира → RT Core →
+    RT OFFICE → CRM Auto/Drive CRM → Jolchu → RT OFFICE → Мира) is the one
+    place RT OFFICE does own its own Prisma state: `PassengerLoopRun`
+    (per-`TripRequest` state machine: `NEW → NORMALIZED → SUPPLY_REQUESTED →
+    MATCHING → OFFER_READY|NO_SUPPLY → OFFER_SENT → PASSENGER_ACCEPTED|
+    PASSENGER_DECLINED|EXPIRED|CANCELLED`) and `PassengerLoopOffer`
+    (per-`Match` sub-state: `CANDIDATE → VALIDATED → RESERVED_PENDING →
+    ACCEPTED|REJECTED|EXPIRED|INVALIDATED`), both defined and transitioned
+    exclusively in `src/lib/rt-office/passenger-loop.ts`. This is
+    observability/audit state layered over the real engine, never a second
+    matching engine — every transition is driven by a hook call from
+    `src/lib/ingest.ts` (loop start, `NO_SUPPLY`/`MATCHING` on the first
+    match attempt), `src/lib/matching/orchestrate.ts` (`OFFER_READY` on
+    every successful `proposeMatchesForRequest`/`proposeToDriver`,
+    `OFFER_SENT`/`PASSENGER_ACCEPTED`/`PASSENGER_DECLINED`/
+    `INVALIDATED`-by-seat-race on the real driver/passenger response
+    handlers, `CANCELLED` from `cancelPendingDemand`), and
+    `src/lib/matching/expiry.ts` (`EXPIRED` from the stale-match sweep) —
+    never invoked independently of the real state change it describes.
+    `transitionLoop`/`transitionLoopOffer` reject any transition outside
+    `LEGAL_RUN_TRANSITIONS`/`LEGAL_OFFER_TRANSITIONS` and are idempotent
+    against redelivery (a repeat call that finds the row already at the
+    target status is a silent no-op, not an error). Last-mile pickup-point
+    resolution goes through `src/lib/rt-office/route-facts.ts`, which calls
+    Jolchu's `resolveRouteIntelligence` under a timeout
+    (`RT_OFFICE_ROUTE_FACTS_TIMEOUT_MS`, default 8000ms) and fails closed —
+    on any timeout, non-`RESOLVED` status, or thrown error it returns
+    `NEEDS_CLARIFICATION`/`TEMPORARILY_UNAVAILABLE`, never a fabricated
+    match. Mira only ever sees the loop's already-composed, non-over-
+    disclosing outcome; it does not read `PassengerLoopRun`/`PassengerLoopOffer`
+    directly and never becomes the orchestrator of this sequence.
 - **CRM Auto** — services Drive CRM: the sole owner of `drive_crm_event_write`,
   appending verified operational facts (ETA, breakdown/incident, backhaul
   opportunity, operational history) to its own append-only `DriveCrmEvent`

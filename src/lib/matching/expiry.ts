@@ -10,6 +10,8 @@ import { logAction } from "@/lib/audit";
 import { notifyDriverPrivately, notifyPassengerText } from "@/lib/mira/outbound";
 import { messages, type Lang } from "@/lib/i18n/messages";
 import { proposeMatchesForRequest } from "./orchestrate";
+import { getLoopRunByTripRequestId, recordOfferExpired, recordOfferReady } from "@/lib/rt-office/passenger-loop";
+import { rootContext } from "@/lib/agents/trace";
 
 const EXPIRY_BATCH_SIZE = 200;
 
@@ -60,6 +62,12 @@ async function expireAwaitingDriverMatch(match: DueDriverMatch) {
   await notifyDriverPrivately(match.driverOffer.driver.telegramUserId, messages.driverResponseTimedOut[driverLang]);
 
   const nextMatch = await proposeMatchesForRequest(match.tripRequestId);
+  const loopRun = await getLoopRunByTripRequestId(match.tripRequestId);
+  if (loopRun) {
+    const ctx = rootContext();
+    await recordOfferExpired(ctx, loopRun.id, match.id, !!nextMatch);
+    if (nextMatch) await recordOfferReady(ctx, loopRun.id, nextMatch.id, nextMatch.driverOfferId);
+  }
   if (!nextMatch) await notifyNoCandidatesLeft(match.tripRequestId);
 }
 
@@ -90,7 +98,13 @@ async function expireAwaitingPassengerMatch(match: DuePassengerMatch) {
   const passengerLang = (match.tripRequest.passenger.preferredLang ?? "RU") as Lang;
   await notifyPassengerText(match.tripRequest.passenger.whatsappId, messages.passengerResponseTimedOut[passengerLang]);
 
-  await proposeMatchesForRequest(match.tripRequestId);
+  const nextMatch = await proposeMatchesForRequest(match.tripRequestId);
+  const loopRun = await getLoopRunByTripRequestId(match.tripRequestId);
+  if (loopRun) {
+    const ctx = rootContext();
+    await recordOfferExpired(ctx, loopRun.id, match.id, !!nextMatch);
+    if (nextMatch) await recordOfferReady(ctx, loopRun.id, nextMatch.id, nextMatch.driverOfferId);
+  }
 }
 
 /** Entry point for the cron sweep. Batched (take: 200) rather than a

@@ -76,6 +76,82 @@ enum MessageParseResult {
   IGNORED_NOT_ALLOWED
 }
 
+// Passenger<->Driver operational loop (RT OFFICE orchestration/observability
+// layer). Additive on top of the real matching engine — never a second
+// matching engine: every status here is *derived from and driven by* real
+// TripRequest/Match transitions in matching/orchestrate.ts, never invented
+// independently. See src/lib/rt-office/passenger-loop.ts.
+enum PassengerLoopStatus {
+  NEW
+  NORMALIZED
+  SUPPLY_REQUESTED
+  MATCHING
+  OFFER_READY
+  NO_SUPPLY
+  OFFER_SENT
+  PASSENGER_ACCEPTED
+  PASSENGER_DECLINED
+  EXPIRED
+  CANCELLED
+}
+
+enum PassengerLoopOfferStatus {
+  CANDIDATE
+  VALIDATED
+  RESERVED_PENDING
+  ACCEPTED
+  REJECTED
+  EXPIRED
+  INVALIDATED
+}
+
+// Fail-closed reason for NO_SUPPLY — chosen by the actual situation
+// (src/lib/rt-office/passenger-loop.ts), never defaulted blindly.
+enum NoSupplyReason {
+  NO_SUPPLY
+  TEMPORARILY_UNAVAILABLE
+  NEEDS_CLARIFICATION
+}
+
+// One row per TripRequest (1:1) — the passenger-facing loop's own status,
+// observability, and fail-closed reasoning, layered on top of the real
+// TripRequest/Match state it reads and reacts to. Never a second source of
+// truth for seat/driver/trip facts: those stay exclusively in
+// TripRequest/Match/Trip/DriverOffer.
+model PassengerLoopRun {
+  id              String              @id @default(cuid())
+  tripRequestId   String              @unique
+  tripRequest     TripRequest         @relation(fields: [tripRequestId], references: [id])
+  correlationId   String              @unique // root AgentContext.traceId for this passenger demand
+  status          PassengerLoopStatus @default(NEW)
+  noSupplyReason  NoSupplyReason?
+  noSupplyDetail  String? // free-text diagnostic (e.g. "JOLCHU_TIMEOUT", "CRM_AUTO_TIMEOUT") — never a second enum
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  offers PassengerLoopOffer[]
+
+  @@index([status])
+}
+
+// One row per Match the loop run has gone through (a passenger can be
+// rematched after a decline/expiry, so this is 1:N, not 1:1). matchId/
+// driverOfferId are loose references (no FK), mirroring DriveCrmEvent's
+// established convention — this table observes the real Match, it never
+// owns or mutates it.
+model PassengerLoopOffer {
+  id          String                   @id @default(cuid())
+  loopRunId   String
+  loopRun     PassengerLoopRun         @relation(fields: [loopRunId], references: [id])
+  matchId     String                   @unique
+  driverOfferId String
+  status      PassengerLoopOfferStatus @default(CANDIDATE)
+  createdAt   DateTime                 @default(now())
+  updatedAt   DateTime                 @updatedAt
+
+  @@index([loopRunId])
+}
+
 enum ActorType {
   AGENT
   DISPATCHER
@@ -303,6 +379,7 @@ model TripRequest {
   createdAt             DateTime      @default(now())
   updatedAt             DateTime      @updatedAt
   matches               Match[]
+  passengerLoopRun      PassengerLoopRun?
 
   @@index([status, travelDate])
   @@index([originStopId, destinationStopId, travelDate])

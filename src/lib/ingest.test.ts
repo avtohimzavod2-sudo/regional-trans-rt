@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@prisma/client";
+import { messages } from "@/lib/i18n/messages";
 
 function p2002Error() {
   return new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
@@ -55,6 +56,22 @@ const resolveSupplyForDispatcherMock = vi.fn().mockResolvedValue({ tripRequestId
 vi.mock("@/lib/rt-office/orchestrator", () => ({
   notifySupplyAvailable: notifySupplyAvailableMock,
   resolveSupplyForDispatcher: resolveSupplyForDispatcherMock,
+}));
+
+const startPassengerDemandLoopMock = vi.fn().mockResolvedValue({ id: "loop_1", status: "SUPPLY_REQUESTED" });
+const advanceLoopToMatchingMock = vi.fn().mockResolvedValue(undefined);
+const recordOfferReadyMock = vi.fn().mockResolvedValue(undefined);
+const recordNoSupplyMock = vi.fn().mockResolvedValue(undefined);
+vi.mock("@/lib/rt-office/passenger-loop", () => ({
+  startPassengerDemandLoop: startPassengerDemandLoopMock,
+  advanceLoopToMatching: advanceLoopToMatchingMock,
+  recordOfferReady: recordOfferReadyMock,
+  recordNoSupply: recordNoSupplyMock,
+}));
+
+const resolvePickupRouteFactsMock = vi.fn().mockResolvedValue({ ok: true, route: null });
+vi.mock("@/lib/rt-office/route-facts", () => ({
+  resolvePickupRouteFacts: resolvePickupRouteFactsMock,
 }));
 
 const logAgentActionMock = vi.fn().mockResolvedValue(undefined);
@@ -211,6 +228,90 @@ describe("ingestPassengerMessage — RT OFFICE demand-side wiring (spec s.8)", (
   });
 });
 
+describe("ingestPassengerMessage — passenger loop wiring (spec A/C/H/J)", () => {
+  function mockPassengerRequestFlow(overrides: Partial<Record<string, unknown>> = {}) {
+    extractTripMessageMock.mockResolvedValue({
+      result: { ...BASE_EXTRACTION, kind: "PASSENGER_REQUEST", originStopKey: "c:a", destinationStopKey: "c:b" },
+      origin: { key: "c:a", nameRu: "A", nameKy: "A", nameEn: "A", aliases: [] },
+      destination: { key: "c:b", nameRu: "B", nameKy: "B", nameEn: "B", aliases: [] },
+    });
+    dbMocks.stop.findFirst.mockResolvedValue({ id: "stop_x" });
+    dbMocks.tripRequest.create.mockResolvedValue({
+      id: "req_1",
+      pickupPoint: null,
+      origin: { nameRu: "A", nameKy: "A", nameEn: "A" },
+      destination: { nameRu: "B", nameKy: "B", nameEn: "B" },
+      ...overrides,
+    });
+  }
+
+  it("starts the loop unconditionally and advances it to MATCHING before calling MATCH", async () => {
+    mockPassengerRequestFlow();
+    proposeMatchesForRequestMock.mockResolvedValue(null);
+
+    await ingestPassengerMessage("+996700000001", "text");
+
+    expect(startPassengerDemandLoopMock).toHaveBeenCalledWith(expect.objectContaining({ traceId: expect.any(String) }), "req_1");
+    expect(advanceLoopToMatchingMock).toHaveBeenCalledWith(expect.anything(), "loop_1");
+  });
+
+  it("records OFFER_READY on the loop with the real match/offer ids (spec A — one passenger to one driver)", async () => {
+    mockPassengerRequestFlow();
+    proposeMatchesForRequestMock.mockResolvedValue({ id: "match_1", driverOfferId: "do_1" });
+
+    await ingestPassengerMessage("+996700000001", "text");
+
+    expect(recordOfferReadyMock).toHaveBeenCalledWith(expect.anything(), "loop_1", "match_1", "do_1");
+    expect(recordNoSupplyMock).not.toHaveBeenCalled();
+  });
+
+  it("records NO_SUPPLY with a diagnostic detail when MATCH finds no candidate (spec C — no drivers)", async () => {
+    mockPassengerRequestFlow();
+    proposeMatchesForRequestMock.mockResolvedValue(null);
+    resolveSupplyForDispatcherMock.mockResolvedValue({ tripRequestId: "req_1", hasCandidateSupply: false, candidates: [] });
+
+    await ingestPassengerMessage("+996700000001", "text");
+
+    expect(recordNoSupplyMock).toHaveBeenCalledWith(expect.anything(), "loop_1", "NO_SUPPLY", "NO_CANDIDATES_ON_FIRST_ATTEMPT");
+    expect(recordOfferReadyMock).not.toHaveBeenCalled();
+  });
+
+  it("fails closed on an unresolvable pickup point — records the exact Jolchu-reported reason and never reaches matching (spec H/J)", async () => {
+    mockPassengerRequestFlow({ pickupPoint: "some vague address" });
+    resolvePickupRouteFactsMock.mockResolvedValue({ ok: false, reason: "NEEDS_CLARIFICATION", detail: "JOLCHU_NEEDS_CONFIRMATION" });
+
+    await ingestPassengerMessage("+996700000001", "text");
+
+    expect(recordNoSupplyMock).toHaveBeenCalledWith(expect.anything(), "loop_1", "NEEDS_CLARIFICATION", "JOLCHU_NEEDS_CONFIRMATION");
+    expect(advanceLoopToMatchingMock).not.toHaveBeenCalled();
+    expect(proposeMatchesForRequestMock).not.toHaveBeenCalled();
+    // requestReceived (always sent) + noCandidatesYet (the fail-closed reply) — never a fabricated success message.
+    expect(sendWhatsAppTextMock).toHaveBeenCalledTimes(2);
+    expect(sendWhatsAppTextMock).toHaveBeenLastCalledWith("+996700000001", messages.noCandidatesYet.RU);
+  });
+
+  it("fails closed on a Jolchu timeout for the pickup point the same way (spec H)", async () => {
+    mockPassengerRequestFlow({ pickupPoint: "slow address" });
+    resolvePickupRouteFactsMock.mockResolvedValue({ ok: false, reason: "TEMPORARILY_UNAVAILABLE", detail: "JOLCHU_TIMEOUT" });
+
+    await ingestPassengerMessage("+996700000001", "text");
+
+    expect(recordNoSupplyMock).toHaveBeenCalledWith(expect.anything(), "loop_1", "TEMPORARILY_UNAVAILABLE", "JOLCHU_TIMEOUT");
+    expect(proposeMatchesForRequestMock).not.toHaveBeenCalled();
+  });
+
+  it("proceeds to matching when the pickup point resolves cleanly", async () => {
+    mockPassengerRequestFlow({ pickupPoint: "clean address" });
+    resolvePickupRouteFactsMock.mockResolvedValue({ ok: true, route: null });
+    proposeMatchesForRequestMock.mockResolvedValue({ id: "match_1", driverOfferId: "do_1" });
+
+    await ingestPassengerMessage("+996700000001", "text");
+
+    expect(advanceLoopToMatchingMock).toHaveBeenCalled();
+    expect(recordOfferReadyMock).toHaveBeenCalledWith(expect.anything(), "loop_1", "match_1", "do_1");
+  });
+});
+
 // Spec s.9/s.14 Test 19 — a redelivered inbound message (same rawMessageId,
 // e.g. a webhook retry) must never create a second TripRequest/DriverOffer.
 // TripRequest.rawMessageId / DriverOffer.rawMessageId now carry a real
@@ -242,6 +343,11 @@ describe("ingestPassengerMessage — Test 19: duplicate demand does not create a
     expect(sendWhatsAppTextMock).not.toHaveBeenCalled();
     expect(proposeMatchesForRequestMock).not.toHaveBeenCalled();
     expect(resolveSupplyForDispatcherMock).not.toHaveBeenCalled();
+    // startPassengerDemandLoop is itself idempotent (P2002-safe) — calling it
+    // unconditionally on the duplicate path can never spawn a second loop run
+    // or re-run its NEW->SUPPLY_REQUESTED transitions (spec G/P).
+    expect(startPassengerDemandLoopMock).toHaveBeenCalledWith(expect.anything(), "req_existing");
+    expect(advanceLoopToMatchingMock).not.toHaveBeenCalled();
   });
 
   it("propagates a non-duplicate DB error (not silently swallowed as a dedup)", async () => {

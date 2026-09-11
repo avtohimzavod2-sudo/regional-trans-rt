@@ -13,6 +13,16 @@ import { openSupportCase } from "@/lib/agents/support";
 import { latestOpenBreakdownForDriver, openBreakdownForDrivers } from "@/lib/crm-auto/bridge";
 import { getDriverResponseTimeoutMinutes, getPassengerResponseTimeoutMinutes } from "./config";
 import { CANCEL_REASON, formatCancelReason, type CancelReasonCode } from "./booking-state";
+import {
+  getLoopRunByTripRequestId,
+  recordDriverDeclined,
+  recordOfferReady,
+  recordOfferSent,
+  recordPassengerAccepted,
+  recordPassengerDeclined,
+  recordOfferInvalidatedBySeatRace,
+  cancelPassengerLoop,
+} from "@/lib/rt-office/passenger-loop";
 
 const ACTIVE_MATCH_STATUSES = ["PROPOSED_TO_DRIVER", "AWAITING_DRIVER", "AWAITING_PASSENGER"] as const;
 type ActiveMatchStatus = (typeof ACTIVE_MATCH_STATUSES)[number];
@@ -252,7 +262,13 @@ export async function handleDriverResponse(matchId: string, accepted: boolean) {
     if (declineResult.count === 0) return db.match.findUniqueOrThrow({ where: { id: matchId } });
 
     await logAction({ actorType: "AGENT", action: "match.declined_by_driver", entityType: "Match", entityId: matchId });
-    await proposeMatchesForRequest(match.tripRequestId);
+    const nextMatch = await proposeMatchesForRequest(match.tripRequestId);
+    const loopRun = await getLoopRunByTripRequestId(match.tripRequestId);
+    if (loopRun) {
+      const ctx = rootContext();
+      await recordDriverDeclined(ctx, loopRun.id, matchId, !!nextMatch);
+      if (nextMatch) await recordOfferReady(ctx, loopRun.id, nextMatch.id, nextMatch.driverOfferId);
+    }
     return db.match.findUniqueOrThrow({ where: { id: matchId } });
   }
 
@@ -276,6 +292,9 @@ export async function handleDriverResponse(matchId: string, accepted: boolean) {
     match.tripRequest.travelDate.toISOString().slice(0, 10),
   );
   await notifyPassengerWithConfirmButtons(match.tripRequest.passenger.whatsappId, text, matchId);
+
+  const loopRunForSent = await getLoopRunByTripRequestId(match.tripRequestId);
+  if (loopRunForSent) await recordOfferSent(rootContext(), loopRunForSent.id, matchId);
 
   await logAction({ actorType: "AGENT", action: "match.confirmed_by_driver", entityType: "Match", entityId: matchId });
   return db.match.findUniqueOrThrow({ where: { id: matchId } });
@@ -306,7 +325,13 @@ export async function handlePassengerResponse(matchId: string, accepted: boolean
     await logAction({ actorType: "AGENT", action: "match.declined_by_passenger", entityType: "Match", entityId: matchId });
     const driverLang = (match.driverOffer.driver.preferredLang ?? "RU") as Lang;
     await notifyDriverPrivately(match.driverOffer.driver.telegramUserId, messages.declinedTryNext[driverLang]);
-    await proposeMatchesForRequest(match.tripRequestId);
+    const nextMatch = await proposeMatchesForRequest(match.tripRequestId);
+    const loopRun = await getLoopRunByTripRequestId(match.tripRequestId);
+    if (loopRun) {
+      const ctx = rootContext();
+      await recordPassengerDeclined(ctx, loopRun.id, matchId, !!nextMatch);
+      if (nextMatch) await recordOfferReady(ctx, loopRun.id, nextMatch.id, nextMatch.driverOfferId);
+    }
     return db.match.findUniqueOrThrow({ where: { id: matchId } });
   }
 
@@ -356,6 +381,12 @@ export async function handlePassengerResponse(matchId: string, accepted: boolean
 
     await db.tripRequest.update({ where: { id: match.tripRequestId }, data: { status: "PENDING" } });
     const nextMatch = await proposeMatchesForRequest(match.tripRequestId);
+    const loopRun = await getLoopRunByTripRequestId(match.tripRequestId);
+    if (loopRun) {
+      const ctx = rootContext();
+      await recordOfferInvalidatedBySeatRace(ctx, loopRun.id, matchId, !!nextMatch);
+      if (nextMatch) await recordOfferReady(ctx, loopRun.id, nextMatch.id, nextMatch.driverOfferId);
+    }
     if (!nextMatch) {
       const passengerLang = (request.passenger.preferredLang ?? "RU") as Lang;
       await notifyPassengerText(request.passenger.whatsappId, messages.noCandidatesYet[passengerLang]);
@@ -380,6 +411,10 @@ export async function handlePassengerResponse(matchId: string, accepted: boolean
   });
 
   await revealContacts(matchId, trip.id);
+
+  const loopRunForAccept = await getLoopRunByTripRequestId(match.tripRequestId);
+  if (loopRunForAccept) await recordPassengerAccepted(rootContext(), loopRunForAccept.id, matchId);
+
   await logAction({ actorType: "AGENT", action: "match.confirmed", entityType: "Match", entityId: matchId, details: { tripId: trip.id } });
   return db.match.findUniqueOrThrow({ where: { id: matchId } });
 }
@@ -677,6 +712,7 @@ export async function cancelPendingDemand(tripRequestId: string) {
       entityId: tripRequestId,
       details: { reasonCode: CANCEL_REASON.PASSENGER_CANCELLED },
     });
+    await cancelPassengerLoop(rootContext(), tripRequestId);
   }
   return { tripRequestId, cancelled: claim.count > 0 };
 }

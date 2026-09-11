@@ -7,6 +7,8 @@ import { sendTelegramDirectMessage, sendTelegramMessage } from "@/lib/messaging/
 import { sendWhatsAppText } from "@/lib/messaging/whatsapp";
 import { proposeMatchesForRequest } from "@/lib/matching/orchestrate";
 import { notifySupplyAvailable, resolveSupplyForDispatcher } from "@/lib/rt-office/orchestrator";
+import { startPassengerDemandLoop, advanceLoopToMatching, recordOfferReady, recordNoSupply } from "@/lib/rt-office/passenger-loop";
+import { resolvePickupRouteFacts } from "@/lib/rt-office/route-facts";
 import { rootContext, logAgentAction } from "@/lib/agents/trace";
 
 // Kyrgyzstan does not observe DST; Asia/Bishkek is a fixed UTC+6 offset.
@@ -141,6 +143,14 @@ export async function ingestPassengerMessage(whatsappId: string, text: string, r
     }
   }
 
+  // Ensures exactly one PassengerLoopRun per TripRequest, on both the fresh
+  // and the redelivered-duplicate path — startPassengerDemandLoop is itself
+  // idempotent (P2002 on tripRequestId), so calling it unconditionally here
+  // can never spawn a second run or re-run its own NEW->SUPPLY_REQUESTED
+  // transitions on a replay (spec item G/P).
+  const ctx = rootContext();
+  const loopRun = await startPassengerDemandLoop(ctx, request.id);
+
   if (isDuplicate) {
     await logAction({
       actorType: "AGENT",
@@ -171,13 +181,33 @@ export async function ingestPassengerMessage(whatsappId: string, text: string, r
     );
   }
 
+  // Spec s.5 — Jolchu last-mile resolution happens here, before a driver is
+  // ever pinged: an unresolvable/ambiguous/timed-out pickup point must fail
+  // closed (never fabricate a matchable pickup) rather than silently letting
+  // an unverified free-text address flow into matching.
+  if (request.pickupPoint) {
+    const routeFacts = await resolvePickupRouteFacts({
+      ctx,
+      pickupPoint: request.pickupPoint,
+      originStopLabel: request.origin.nameEn,
+      conversationId: request.id,
+    });
+    if (!routeFacts.ok) {
+      await recordNoSupply(ctx, loopRun.id, routeFacts.reason, routeFacts.detail);
+      if (notify) await sendWhatsAppText(whatsappId, messages.noCandidatesYet[lang]);
+      return request;
+    }
+  }
+
+  await advanceLoopToMatching(ctx, loopRun.id);
   const match = await proposeMatchesForRequest(request.id);
-  if (!match) {
+  if (match) {
+    await recordOfferReady(ctx, loopRun.id, match.id, match.driverOfferId);
+  } else {
     // Spec s.8 — RT OFFICE must be the one to recognize (and audit) that no
     // verified supply exists yet for this request, distinct from MATCH's own
     // silent "no candidate" outcome. Re-reads the same live tables (no second
     // matching engine, no invented facts) purely to make the gap observable.
-    const ctx = rootContext();
     const supply = await resolveSupplyForDispatcher(request.id);
     await logAgentAction({
       ctx,
@@ -187,6 +217,8 @@ export async function ingestPassengerMessage(whatsappId: string, text: string, r
       entityId: request.id,
       details: { hasCandidateSupply: supply.hasCandidateSupply },
     });
+    await recordNoSupply(ctx, loopRun.id, "NO_SUPPLY", "NO_CANDIDATES_ON_FIRST_ATTEMPT");
+    if (notify) await sendWhatsAppText(whatsappId, messages.noCandidatesYet[lang]);
   }
   return request;
 }
