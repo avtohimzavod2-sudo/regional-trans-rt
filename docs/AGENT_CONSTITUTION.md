@@ -47,6 +47,33 @@ contract):
 | `delivery_executor_prospect_write` | DELIVERY_EXECUTOR_CONTRACTOR |
 | `cargo_carrier_prospect_write` | CARGO_CARRIER_CONTRACTOR |
 
+### 2a. Capabilities no agent owns
+
+`assertNoCapabilityConflicts` catches a capability claimed **twice**. It
+cannot catch one claimed **zero** times, because an unclaimed capability
+leaves no trace in `AGENT_REGISTRY` at all — and an unowned responsibility is
+the more dangerous failure. The table above is therefore a floor, not a map:
+it lists what agents declared, not what RT is responsible for.
+
+[`RT_ACCOUNTABILITY_MATRIX.md`](./RT_ACCOUNTABILITY_MATRIX.md) closes that gap.
+It enumerates every capability RT must own — including ones with no
+implementation yet, such as tariff authority, fraud-risk signals, driver and
+vehicle verification, the passenger cashier, and the human-owned security,
+privacy, legal and reliability functions — and assigns each exactly one
+accountable owner. `src/lib/governance/validate.ts` enforces the structure;
+`src/lib/governance/readiness.ts` treats a capability whose owner exists only
+on paper as **not ready**, so writing a name into the matrix can never
+substitute for building the thing.
+
+Two rules from that layer bind agent contracts directly:
+
+- **A reviewer is not an approver.** Where a capability requires human
+  approval, the approver must be a human role. No agent, however senior, can
+  fill that slot — not Artur, not Adilet.
+- **You cannot report to, or escalate to, someone who does not exist.** An
+  escalation path ending at an unbuilt manager is not an escalation path, and
+  is rejected by the readiness gate.
+
 ## 3. Role-boundary preservation
 
 Each specialist's boundary, established before Artur existed and never

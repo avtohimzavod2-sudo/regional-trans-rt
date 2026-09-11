@@ -14,6 +14,7 @@
     "db:seed:acquisition-demo": "tsx prisma/seed-acquisition-fixtures.ts",
     "db:clear:acquisition-demo": "tsx prisma/seed-acquisition-fixtures.ts --clear",
     "db:studio": "prisma studio",
+    "docs:governance": "tsx scripts/generate-governance-docs.ts",
     "test": "vitest run"
   },
   "prisma": {

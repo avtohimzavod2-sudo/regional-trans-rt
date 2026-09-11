@@ -6,6 +6,31 @@ Artur as the AI-side management layer. This document is the map; each
 agent's binding contract lives in its own `orchestrator.ts` and is indexed
 in `src/lib/agents/registry.ts`'s `AGENT_REGISTRY`.
 
+> **Machine-checked companions.** This map is prose and describes the agent
+> layer. Two generated documents describe the *whole* organization — including
+> the human roles, the deterministic services and the responsibilities nobody
+> owns yet — and are validated by tests rather than by review:
+>
+> - [`RT_ACCOUNTABILITY_MATRIX.md`](./RT_ACCOUNTABILITY_MATRIX.md) — every
+>   capability and its single accountable owner, generated from
+>   `src/lib/governance/`.
+> - [`RT_PRE_LIVE_READINESS.md`](./RT_PRE_LIVE_READINESS.md) — what still
+>   blocks a real launch. It fails closed on UNKNOWN, and a passing test suite
+>   never contributes to a LIVE verdict.
+>
+> Where this document and the generated ones disagree, the generated ones are
+> right: they are produced from the code that enforces the rules. Two
+> distinctions they add on purpose:
+>
+> - **Classification by behavior, not by name.** Only Artur, Jolchu and Mira
+>   invoke a reasoning provider. The other registry entries are deterministic
+>   services, adapters or read-only analytics, and are labelled as such rather
+>   than described as autonomous employees.
+> - **Current vs intended accountability.** Akzhol and Zholaman are referenced
+>   throughout the codebase but do not exist as modules. Nodes intended to sit
+>   under them report to Artur today; the intent is recorded separately so an
+>   empty manager box never stands in for a real one.
+
 ## 1. Org chart
 
 ```mermaid
