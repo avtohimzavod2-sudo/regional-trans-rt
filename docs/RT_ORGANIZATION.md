@@ -639,3 +639,23 @@ sequenceDiagram
     CRM->>Match: handleDriverBreakdown / setDriverReportedSeatsAvailable
     Match->>Mira: notify affected passenger, rematch
 ```
+
+## 8. RT Delivery / RT Cargo / RT Prospecting architecture
+
+The architectural foundation for splitting Sapar's single cargo/delivery
+contour into separate RT Delivery and RT Cargo contours, a shared Partner
+Registry capability layer, and a shared Prospecting Core for the five
+market-acquisition contragents (extending s.6 above) lives in
+`docs/architecture/`, not in this file, to keep this org-chart document
+focused on agents and event flow:
+
+- [`docs/architecture/delivery-cargo.md`](./architecture/delivery-cargo.md) — CargoProfile/TransportRequirements, the brand-independent vehicle-class taxonomy, the `NO_SINGLE_WEIGHT_THRESHOLD_ROUTING` invariant, and the `DeliveryCargoRouter` contract.
+- [`docs/architecture/partner-registry.md`](./architecture/partner-registry.md) — how `PartnerCapability`/`TransportAsset` extend the existing `Partner` model without duplicating it.
+- [`docs/architecture/prospecting.md`](./architecture/prospecting.md) — how the five prospecting contragents (s.6 above) map onto `ProspectType`, the shared `src/lib/acquisition/` safety gate, and the `ProspectHandoff` contract.
+- [`docs/adr/0001-delivery-cargo-separation.md`](./adr/0001-delivery-cargo-separation.md) — the decision record.
+
+This is a documented, tested skeleton (`src/lib/cargo-profile/`,
+`src/lib/partner-registry/`, `src/lib/prospecting/`) — not a new Cargo CRM,
+not a new agent, and not a change to any existing agent's contract or to
+`prisma/schema.prisma`.
+
