@@ -1,4 +1,5 @@
 import { Bot, InlineKeyboard } from "grammy";
+import { isScenarioContext, ScenarioSuppressedSendError } from "@/lib/testing/scenario-context";
 
 let botInstance: Bot | null = null;
 
@@ -19,11 +20,16 @@ export function confirmDeclineKeyboard(matchId: string, role: "driver" | "passen
 }
 
 export async function sendTelegramMessage(chatId: string, text: string, keyboard?: InlineKeyboard) {
+  if (isScenarioContext()) throw new ScenarioSuppressedSendError("Telegram");
   const bot = getTelegramBot();
   return bot.api.sendMessage(chatId, text, keyboard ? { reply_markup: keyboard } : undefined);
 }
 
 export async function sendTelegramDirectMessage(userId: string, text: string): Promise<boolean> {
+  // Suppressed like a blocked chat (false), not a thrown error: unlike
+  // sendTelegramMessage, callers of this function already treat "false" as
+  // the honest not-delivered outcome, so no exception is needed here.
+  if (isScenarioContext()) return false;
   try {
     await getTelegramBot().api.sendMessage(userId, text);
     return true;
