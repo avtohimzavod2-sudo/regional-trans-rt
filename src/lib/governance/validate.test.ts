@@ -9,7 +9,17 @@ import {
   validateAccountabilityMatrix,
   validateGovernance,
   validateOrgChart,
+  type RegistryCapabilityClaim,
 } from "./validate";
+
+/** The live exclusive-capability claims, flattened the way validate.ts wants
+ * them. Built from AGENT_REGISTRY rather than hand-listed so a new contract
+ * is covered the moment it is written. */
+function registryClaims(): RegistryCapabilityClaim[] {
+  return AGENT_REGISTRY.flatMap((a) =>
+    (a.ownsExclusiveCapabilities ?? []).map((capability) => ({ capability, owner: String(a.name).toUpperCase() })),
+  );
+}
 
 /** Minimal well-formed chart used as the base for negative cases, so each
  * test perturbs exactly one thing. */
@@ -239,6 +249,36 @@ describe("validateGovernance against live registry state", () => {
 
   it("assertGovernanceValid does not throw for the real structure", () => {
     expect(() => assertGovernanceValid()).not.toThrow();
+  });
+
+  // AUDIT FINDING (s.27): the matrix was written independently of
+  // AGENT_REGISTRY and 14 of the registry's 18 exclusive capabilities had no
+  // matrix entry naming them. The owners happened to agree in every case, so
+  // nothing was actually mis-assigned — but nothing was checking, and three
+  // of the pairs differ only in wording (`external_` vs `public_customer_
+  // communication`, `confirm_cargo_payment` vs `cargo_payment_confirmation`,
+  // `complaint_` vs `dispute_arbitration_decision`). These run the coverage
+  // rules against the live registry so the mapping cannot rot.
+  it("maps every registry exclusive capability to exactly one accountability", () => {
+    expect(validateGovernance({ registryCapabilities: registryClaims() })).toEqual([]);
+  });
+
+  it("rejects a registry capability that no matrix entry claims", () => {
+    const codes = validateGovernance({
+      registryCapabilities: [...registryClaims(), { capability: "ghost_capability", owner: "MIRA" }],
+    }).map((v) => v.code);
+
+    expect(codes).toContain("UNMAPPED_REGISTRY_CAPABILITY");
+  });
+
+  it("rejects a mapping that moves accountability away from the registry owner", () => {
+    const claims = registryClaims().map((c) =>
+      c.capability === "external_customer_communication" ? { ...c, owner: "SAPAR" } : c,
+    );
+
+    expect(validateGovernance({ registryCapabilities: claims }).map((v) => v.code)).toContain(
+      "IMPLEMENTED_BY_OWNER_MISMATCH",
+    );
   });
 
   it("assertGovernanceValid throws with a readable report", () => {

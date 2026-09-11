@@ -38,12 +38,23 @@ export type GovernanceViolationCode =
   | "MISSING_ESCALATION_TARGET"
   | "SELF_ESCALATION"
   | "MISSING_PLANNED_ESCALATION_TARGET"
-  | "INACTIVE_OWNER_OF_PRE_LIVE_CAPABILITY";
+  | "INACTIVE_OWNER_OF_PRE_LIVE_CAPABILITY"
+  | "UNMAPPED_REGISTRY_CAPABILITY"
+  | "UNKNOWN_IMPLEMENTED_BY"
+  | "DUPLICATE_IMPLEMENTED_BY"
+  | "IMPLEMENTED_BY_OWNER_MISMATCH";
 
 export interface GovernanceViolation {
   code: GovernanceViolationCode;
   subject: string;
   detail: string;
+}
+
+/** One `ownsExclusiveCapabilities` entry as declared in AGENT_REGISTRY. */
+export interface RegistryCapabilityClaim {
+  capability: string;
+  /** The registry agent name, upper-cased to match org node ids. */
+  owner: string;
 }
 
 interface ValidationInput {
@@ -52,6 +63,11 @@ interface ValidationInput {
   /** Org node ids considered inactive/legacy. Sourced by callers from
    * AGENT_REGISTRY (`active: false`) so this module stays dependency-light. */
   inactiveNodeIds?: readonly string[];
+  /** Exclusive capability claims from AGENT_REGISTRY. Passed in for the same
+   * reason as inactiveNodeIds: this module must not import the registry. When
+   * omitted the registry-coverage rules are skipped, so callers that want
+   * them (the governance test suite) must supply real data. */
+  registryCapabilities?: readonly RegistryCapabilityClaim[];
 }
 
 function lookup(nodes: RtOrgNode[]): (id: string) => RtOrgNode | undefined {
@@ -270,8 +286,87 @@ export function validateAccountabilityMatrix(input: ValidationInput = {}): Gover
   return violations;
 }
 
+/** s.27: the matrix and AGENT_REGISTRY must describe the same organization.
+ *
+ * The two use different vocabularies on purpose — the registry names what a
+ * module exclusively claims in code, the matrix names a responsibility
+ * someone answers for — so the link between them has to be written down
+ * (`implementedBy`) and then checked, or it rots silently. The near-misses
+ * are what make this worth enforcing: the registry's
+ * `external_customer_communication` and the matrix's
+ * `public_customer_communication` are the same duty under two names, and
+ * nothing but a total mapping will ever notice.
+ *
+ * Checked in both directions: every registry claim is covered exactly once,
+ * and every `implementedBy` entry refers to a claim that really exists. The
+ * owners must agree too — a mapping that quietly reassigns accountability
+ * from the code's owner to someone else is the failure this whole layer is
+ * supposed to prevent. */
+export function validateRegistryCoverage(input: ValidationInput = {}): GovernanceViolation[] {
+  const claims = input.registryCapabilities;
+  if (!claims) return [];
+
+  const matrix = input.matrix ?? RT_ACCOUNTABILITY_MATRIX;
+  const violations: GovernanceViolation[] = [];
+  const claimOwners = new Map(claims.map((c) => [c.capability, c.owner]));
+  const claimedBy = new Map<string, string>();
+
+  for (const cap of matrix) {
+    for (const impl of cap.implementedBy ?? []) {
+      const previous = claimedBy.get(impl);
+      if (previous) {
+        violations.push({
+          code: "DUPLICATE_IMPLEMENTED_BY",
+          subject: impl,
+          detail: `mapped to both "${previous}" and "${cap.capability}"; a code capability answers to one accountability`,
+        });
+        continue;
+      }
+      claimedBy.set(impl, cap.capability);
+
+      const owner = claimOwners.get(impl);
+      if (owner === undefined) {
+        violations.push({
+          code: "UNKNOWN_IMPLEMENTED_BY",
+          subject: cap.capability,
+          detail: `implementedBy "${impl}" is not an ownsExclusiveCapabilities entry in AGENT_REGISTRY`,
+        });
+        continue;
+      }
+
+      // The registry's owner must appear in this capability's cast. Anything
+      // else means the matrix has moved accountability away from the module
+      // that actually holds the exclusive claim.
+      const cast = [cap.accountableOwner, cap.executor, cap.reviewer, cap.handoffTarget].filter(Boolean);
+      if (!cast.includes(owner)) {
+        violations.push({
+          code: "IMPLEMENTED_BY_OWNER_MISMATCH",
+          subject: cap.capability,
+          detail: `AGENT_REGISTRY gives "${impl}" to ${owner}, who is not the owner, executor, reviewer or handoff target here`,
+        });
+      }
+    }
+  }
+
+  for (const claim of claims) {
+    if (!claimedBy.has(claim.capability)) {
+      violations.push({
+        code: "UNMAPPED_REGISTRY_CAPABILITY",
+        subject: claim.capability,
+        detail: `declared exclusive by ${claim.owner} but no accountability matrix entry lists it in implementedBy`,
+      });
+    }
+  }
+
+  return violations;
+}
+
 export function validateGovernance(input: ValidationInput = {}): GovernanceViolation[] {
-  return [...validateOrgChart(input.nodes ?? RT_ORG_NODES), ...validateAccountabilityMatrix(input)];
+  return [
+    ...validateOrgChart(input.nodes ?? RT_ORG_NODES),
+    ...validateAccountabilityMatrix(input),
+    ...validateRegistryCoverage(input),
+  ];
 }
 
 export function assertGovernanceValid(input: ValidationInput = {}): void {

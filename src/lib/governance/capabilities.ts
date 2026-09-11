@@ -64,12 +64,26 @@ export interface RtCapability {
   humanApprover?: string;
   preLiveRequired: boolean;
   failureMode: string;
+  /** The `ownsExclusiveCapabilities` strings in AGENT_REGISTRY that this
+   * governance capability covers.
+   *
+   * The two vocabularies are deliberately different: the registry names what
+   * a module exclusively claims in code, this matrix names a responsibility
+   * someone answers for, and they sit at different granularities (Artur's
+   * three report capabilities are one accountability). Without an explicit
+   * link the gap between them is silent, and the near-misses are the
+   * dangerous part — the registry says `external_customer_communication`
+   * while the matrix says `public_customer_communication`, and no human
+   * skimming either file would notice. validate.ts requires this mapping to
+   * be total and non-overlapping in both directions. */
+  implementedBy?: string[];
 }
 
 export const RT_ACCOUNTABILITY_MATRIX: RtCapability[] = [
   // ---- Communication -----------------------------------------------------
   {
     capability: "public_customer_communication",
+    implementedBy: ["external_customer_communication"],
     domain: "COMMUNICATION",
     type: "EXECUTION",
     accountableOwner: "MIRA",
@@ -191,6 +205,7 @@ export const RT_ACCOUNTABILITY_MATRIX: RtCapability[] = [
   },
   {
     capability: "drive_crm_event_write",
+    implementedBy: ["drive_crm_event_write"],
     domain: "DRIVER_OPS",
     type: "SYSTEM_OF_RECORD",
     accountableOwner: "CRM_AUTO",
@@ -248,6 +263,7 @@ export const RT_ACCOUNTABILITY_MATRIX: RtCapability[] = [
   // ---- Delivery / cargo --------------------------------------------------
   {
     capability: "cargo_shipment_execution",
+    implementedBy: ["cargo_operational_status"],
     domain: "DELIVERY_OPS",
     type: "EXECUTION",
     accountableOwner: "SAPAR",
@@ -261,6 +277,7 @@ export const RT_ACCOUNTABILITY_MATRIX: RtCapability[] = [
   },
   {
     capability: "assign_cargo_delivery_executor",
+    implementedBy: ["assign_cargo_delivery_executor"],
     domain: "DELIVERY_OPS",
     type: "DECISION",
     accountableOwner: "SAPAR",
@@ -314,6 +331,7 @@ export const RT_ACCOUNTABILITY_MATRIX: RtCapability[] = [
   },
   {
     capability: "cargo_payment_confirmation",
+    implementedBy: ["confirm_cargo_payment"],
     domain: "FINANCE",
     type: "DECISION",
     accountableOwner: "SAPARGUL",
@@ -341,12 +359,14 @@ export const RT_ACCOUNTABILITY_MATRIX: RtCapability[] = [
   },
   {
     capability: "central_treasury_bank_truth",
+    implementedBy: ["central_treasury_transaction_record", "accountant_case_escalation"],
     domain: "FINANCE",
     type: "SYSTEM_OF_RECORD",
     accountableOwner: "TYYIN",
     executor: "TYYIN",
     reviewer: "HUMAN_ACCOUNTANT",
     systemOfRecord: "TreasuryTransaction",
+    handoffTarget: "HUMAN_ACCOUNTANT",
     escalationTarget: "ARTUR",
     humanApprovalRequired: false,
     preLiveRequired: true,
@@ -425,6 +445,7 @@ export const RT_ACCOUNTABILITY_MATRIX: RtCapability[] = [
   },
   {
     capability: "dispute_arbitration_decision",
+    implementedBy: ["complaint_arbitration_decision"],
     domain: "DISPUTES",
     type: "DECISION",
     accountableOwner: "ADILET",
@@ -437,6 +458,7 @@ export const RT_ACCOUNTABILITY_MATRIX: RtCapability[] = [
   },
   {
     capability: "disciplinary_sanction",
+    implementedBy: ["disciplinary_sanction"],
     domain: "DISPUTES",
     type: "DECISION",
     accountableOwner: "ADILET",
@@ -551,6 +573,7 @@ export const RT_ACCOUNTABILITY_MATRIX: RtCapability[] = [
   // ---- Acquisition -------------------------------------------------------
   {
     capability: "driver_acquisition_outreach",
+    implementedBy: ["driver_acquisition_outreach"],
     domain: "ACQUISITION",
     type: "EXECUTION",
     accountableOwner: "DRIVER_CONTRACTOR",
@@ -565,6 +588,7 @@ export const RT_ACCOUNTABILITY_MATRIX: RtCapability[] = [
   },
   {
     capability: "passenger_acquisition_outreach",
+    implementedBy: ["passenger_prospect_write"],
     domain: "ACQUISITION",
     type: "EXECUTION",
     accountableOwner: "PASSENGER_CONTRACTOR",
@@ -579,6 +603,7 @@ export const RT_ACCOUNTABILITY_MATRIX: RtCapability[] = [
   },
   {
     capability: "business_customer_acquisition",
+    implementedBy: ["business_prospect_write", "delivery_crm_event_write"],
     domain: "ACQUISITION",
     type: "EXECUTION",
     accountableOwner: "DELIVERY_CONTRACTOR",
@@ -593,6 +618,7 @@ export const RT_ACCOUNTABILITY_MATRIX: RtCapability[] = [
   },
   {
     capability: "delivery_executor_acquisition",
+    implementedBy: ["delivery_executor_prospect_write"],
     domain: "ACQUISITION",
     type: "EXECUTION",
     accountableOwner: "DELIVERY_EXECUTOR_CONTRACTOR",
@@ -607,6 +633,7 @@ export const RT_ACCOUNTABILITY_MATRIX: RtCapability[] = [
   },
   {
     capability: "cargo_carrier_acquisition",
+    implementedBy: ["cargo_carrier_prospect_write"],
     domain: "ACQUISITION",
     type: "EXECUTION",
     accountableOwner: "CARGO_CARRIER_CONTRACTOR",
@@ -728,6 +755,7 @@ export const RT_ACCOUNTABILITY_MATRIX: RtCapability[] = [
   },
   {
     capability: "executive_reporting",
+    implementedBy: ["director_daily_brief", "director_weekly_report", "director_strategic_initiative_proposal"],
     domain: "MANAGEMENT",
     type: "OBSERVATION",
     accountableOwner: "ARTUR",

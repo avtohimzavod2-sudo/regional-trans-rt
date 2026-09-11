@@ -54,6 +54,9 @@ export function renderAccountabilityMatrixDoc(matrix: RtCapability[] = RT_ACCOUN
   lines.push("- **Escalates to** — where this goes when it cannot be resolved. Must be a node that exists today.");
   lines.push("- **Pre-LIVE** — must have a real, implemented owner before RT may serve real customers.");
   lines.push(
+    "- **Code capabilities** — the `ownsExclusiveCapabilities` entries in `AGENT_REGISTRY` this responsibility covers. The two vocabularies differ by design and at different granularities, so the link is written down and checked in both directions; an unmapped code capability fails the build.",
+  );
+  lines.push(
     "- *(planned)* — the node is named but does not exist in code. Naming an owner does not make a responsibility solved; see RT_PRE_LIVE_READINESS.md.",
   );
   lines.push("");
@@ -78,6 +81,18 @@ export function renderAccountabilityMatrixDoc(matrix: RtCapability[] = RT_ACCOUN
     }
     lines.push("");
     lines.push("</details>");
+
+    const mapped = caps.filter((c) => (c.implementedBy ?? []).length > 0);
+    if (mapped.length > 0) {
+      lines.push("");
+      lines.push("<details><summary>Code capabilities (AGENT_REGISTRY)</summary>");
+      lines.push("");
+      for (const cap of mapped) {
+        lines.push(`- \`${cap.capability}\` ← ${(cap.implementedBy ?? []).map((i) => `\`${i}\``).join(", ")}`);
+      }
+      lines.push("");
+      lines.push("</details>");
+    }
     lines.push("");
   }
 

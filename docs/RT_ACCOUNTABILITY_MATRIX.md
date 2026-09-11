@@ -12,6 +12,7 @@ One responsibility has exactly one accountable owner. Not zero, not two. Others 
 - **Human approver** — required where a machine must never decide alone. Must be a person; an agent can never fill this slot.
 - **Escalates to** — where this goes when it cannot be resolved. Must be a node that exists today.
 - **Pre-LIVE** — must have a real, implemented owner before RT may serve real customers.
+- **Code capabilities** — the `ownsExclusiveCapabilities` entries in `AGENT_REGISTRY` this responsibility covers. The two vocabularies differ by design and at different granularities, so the link is written down and checked in both directions; an unmapped code capability fails the build.
 - *(planned)* — the node is named but does not exist in code. Naming an owner does not make a responsibility solved; see RT_PRE_LIVE_READINESS.md.
 
 Capabilities: **51** · Pre-LIVE required: **33** · Structural violations: **0**
@@ -33,6 +34,16 @@ Capabilities: **51** · Pre-LIVE required: **33** · Structural violations: **0*
 - `business_customer_acquisition` — Outreach reported FAILED honestly; never a fabricated SENT.
 - `delivery_executor_acquisition` — Outreach reported FAILED honestly; never a fabricated SENT.
 - `cargo_carrier_acquisition` — Outreach reported FAILED honestly; never a fabricated SENT.
+
+</details>
+
+<details><summary>Code capabilities (AGENT_REGISTRY)</summary>
+
+- `driver_acquisition_outreach` ← `driver_acquisition_outreach`
+- `passenger_acquisition_outreach` ← `passenger_prospect_write`
+- `business_customer_acquisition` ← `business_prospect_write`, `delivery_crm_event_write`
+- `delivery_executor_acquisition` ← `delivery_executor_prospect_write`
+- `cargo_carrier_acquisition` ← `cargo_carrier_prospect_write`
 
 </details>
 
@@ -66,6 +77,12 @@ Capabilities: **51** · Pre-LIVE required: **33** · Structural violations: **0*
 
 </details>
 
+<details><summary>Code capabilities (AGENT_REGISTRY)</summary>
+
+- `public_customer_communication` ← `external_customer_communication`
+
+</details>
+
 ## DELIVERY OPS
 
 | Capability | Type | Accountable owner | Executor | Reviewer | Human approver | System of record | Escalates to | Pre-LIVE |
@@ -79,6 +96,13 @@ Capabilities: **51** · Pre-LIVE required: **33** · Structural violations: **0*
 - `cargo_shipment_execution` — Shipment stays in its prior state; no silent completion.
 - `assign_cargo_delivery_executor` — Unassigned shipment surfaces to dispatcher.
 - `passenger_corridor_parcel_lifecycle` — Invalid transition rejected by canTransitionParcel().
+
+</details>
+
+<details><summary>Code capabilities (AGENT_REGISTRY)</summary>
+
+- `cargo_shipment_execution` ← `cargo_operational_status`
+- `assign_cargo_delivery_executor` ← `assign_cargo_delivery_executor`
 
 </details>
 
@@ -96,6 +120,13 @@ Capabilities: **51** · Pre-LIVE required: **33** · Structural violations: **0*
 
 </details>
 
+<details><summary>Code capabilities (AGENT_REGISTRY)</summary>
+
+- `dispute_arbitration_decision` ← `complaint_arbitration_decision`
+- `disciplinary_sanction` ← `disciplinary_sanction`
+
+</details>
+
 ## DRIVER OPS
 
 | Capability | Type | Accountable owner | Executor | Reviewer | Human approver | System of record | Escalates to | Pre-LIVE |
@@ -109,6 +140,12 @@ Capabilities: **51** · Pre-LIVE required: **33** · Structural violations: **0*
 - `driver_offer_intake` — Offer not created; driver told honestly.
 - `drive_crm_event_write` — Event not appended; no in-place mutation is ever attempted.
 - `driver_discovery_intelligence` — No candidate produced. Confidence is never treated as identity proof.
+
+</details>
+
+<details><summary>Code capabilities (AGENT_REGISTRY)</summary>
+
+- `drive_crm_event_write` ← `drive_crm_event_write`
 
 </details>
 
@@ -133,6 +170,13 @@ Capabilities: **51** · Pre-LIVE required: **33** · Structural violations: **0*
 - `central_treasury_bank_truth` — No confirmation recorded; waits safely rather than assuming receipt.
 - `refund_authorization` — Refund not authorized; request stays open for human decision.
 - `financial_exception_resolution` — Exception stays queued; no agent may self-resolve it.
+
+</details>
+
+<details><summary>Code capabilities (AGENT_REGISTRY)</summary>
+
+- `cargo_payment_confirmation` ← `confirm_cargo_payment`
+- `central_treasury_bank_truth` ← `central_treasury_transaction_record`, `accountant_case_escalation`
 
 </details>
 
@@ -177,6 +221,12 @@ Capabilities: **51** · Pre-LIVE required: **33** · Structural violations: **0*
 - `delivery_cargo_performance_management` — ORPHAN TODAY: only a payment-visibility filter exists (s.9).
 - `executive_reporting` — Report generation failure must never block operations (s.20).
 - `launch_readiness_decision` — Fails closed: unknown readiness is never LIVE_READY (s.29).
+
+</details>
+
+<details><summary>Code capabilities (AGENT_REGISTRY)</summary>
+
+- `executive_reporting` ← `director_daily_brief`, `director_weekly_report`, `director_strategic_initiative_proposal`
 
 </details>
 
