@@ -1,3 +1,5 @@
+import { createHmac, timingSafeEqual } from "node:crypto";
+
 const GRAPH_VERSION = "v21.0";
 
 function apiUrl(path: string) {
@@ -61,6 +63,24 @@ export function verifyWhatsAppWebhook(mode: string | null, token: string | null,
     return challenge;
   }
   return null;
+}
+
+/**
+ * Verifies Meta's X-Hub-Signature-256 header against the exact raw request
+ * body using WHATSAPP_APP_SECRET. Fails closed: an unconfigured secret
+ * rejects every request rather than accepting unsigned deliveries. Uses
+ * timingSafeEqual so a wrong signature cannot be brute-forced byte-by-byte
+ * via response-time differences.
+ */
+export function verifyWhatsAppSignature(rawBody: string, signatureHeader: string | null): boolean {
+  const secret = process.env.WHATSAPP_APP_SECRET;
+  if (!secret || !signatureHeader) return false;
+
+  const [scheme, providedHex] = signatureHeader.split("=");
+  if (scheme !== "sha256" || !providedHex || !/^[0-9a-f]{64}$/i.test(providedHex)) return false;
+
+  const expectedHex = createHmac("sha256", secret).update(rawBody, "utf8").digest("hex");
+  return timingSafeEqual(Buffer.from(expectedHex, "hex"), Buffer.from(providedHex, "hex"));
 }
 
 export interface WhatsAppInboundText {

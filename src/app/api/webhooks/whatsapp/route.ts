@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { parseWhatsAppWebhookPayload, verifyWhatsAppWebhook } from "@/lib/messaging/whatsapp";
+import { parseWhatsAppWebhookPayload, verifyWhatsAppSignature, verifyWhatsAppWebhook } from "@/lib/messaging/whatsapp";
 import { handleMiraInbound, handleMiraMatchDecision } from "@/lib/mira/orchestrator";
 
 export async function GET(req: NextRequest) {
@@ -14,7 +14,12 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const payload = await req.json();
+  const rawBody = await req.text();
+  if (!verifyWhatsAppSignature(rawBody, req.headers.get("x-hub-signature-256"))) {
+    return new NextResponse("Forbidden", { status: 403 });
+  }
+
+  const payload = JSON.parse(rawBody);
   const { texts, buttonReplies } = parseWhatsAppWebhookPayload(payload);
 
   for (const msg of texts) {
