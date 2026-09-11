@@ -19,6 +19,12 @@ export interface OutreachRequest {
    * see outreach-log.ts's P2002-based dedup, the same pattern
    * crm-auto/orchestrator.ts's recordOperationalEvent uses. */
   idempotencyKey: string;
+  /** Normalized cross-type identity signal (src/lib/prospecting/identity.ts).
+   * When present, an opt-out recorded against this fingerprint by ANY
+   * contractor blocks outreach here too, even under a different
+   * prospectType/prospectRef — see isDoNotContactFingerprint. Optional:
+   * absent for any caller that hasn't computed one. */
+  contactFingerprint?: string | null;
 }
 
 export interface OutreachOutcome {

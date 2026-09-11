@@ -27,6 +27,8 @@ import { CRM_AUTO_AGENT_CONTRACT } from "@/lib/crm-auto/orchestrator";
 import { DRIVER_CONTRACTOR_AGENT_CONTRACT } from "@/lib/driver-contractor/orchestrator";
 import { PASSENGER_CONTRACTOR_AGENT_CONTRACT } from "@/lib/passenger-contractor/orchestrator";
 import { DELIVERY_CONTRACTOR_AGENT_CONTRACT } from "@/lib/delivery-contractor/orchestrator";
+import { DELIVERY_EXECUTOR_CONTRACTOR_AGENT_CONTRACT } from "@/lib/delivery-executor-contractor/orchestrator";
+import { CARGO_CARRIER_CONTRACTOR_AGENT_CONTRACT } from "@/lib/cargo-carrier-contractor/orchestrator";
 
 export const AGENT_REGISTRY: AgentContract[] = [
   MIRA_AGENT_CONTRACT,
@@ -41,6 +43,8 @@ export const AGENT_REGISTRY: AgentContract[] = [
   DRIVER_CONTRACTOR_AGENT_CONTRACT,
   PASSENGER_CONTRACTOR_AGENT_CONTRACT,
   DELIVERY_CONTRACTOR_AGENT_CONTRACT,
+  DELIVERY_EXECUTOR_CONTRACTOR_AGENT_CONTRACT,
+  CARGO_CARRIER_CONTRACTOR_AGENT_CONTRACT,
   COMMAND_AGENT_CONTRACT,
   PASSENGER_AGENT_CONTRACT,
   DRIVER_AGENT_CONTRACT,

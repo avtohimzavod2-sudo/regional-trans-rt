@@ -37,6 +37,19 @@ export async function isDoNotContact(prospectType: AcquisitionProspectType, pros
   return !!flagged;
 }
 
+/** Cross-type opt-out check (master spec s.4): an opt-out recorded by ANY
+ * contractor against this normalized identity blocks every other contractor
+ * from contacting the same real person under a different
+ * prospectType/prospectRef. Fingerprint is optional everywhere it's threaded
+ * through — a caller with no fingerprint simply can't benefit from this
+ * check and falls back to the per-prospect isDoNotContact above. */
+export async function isDoNotContactFingerprint(contactFingerprint: string): Promise<boolean> {
+  const flagged = await db.acquisitionOutreachEvent.findFirst({
+    where: { contactFingerprint, doNotContact: true },
+  });
+  return !!flagged;
+}
+
 async function recentlyContacted(prospectType: AcquisitionProspectType, prospectRef: string): Promise<boolean> {
   const recent = await db.acquisitionOutreachEvent.findFirst({
     where: {
@@ -50,7 +63,7 @@ async function recentlyContacted(prospectType: AcquisitionProspectType, prospect
 }
 
 async function writeOutreachEvent(
-  request: Pick<OutreachRequest, "contractorAgent" | "prospectType" | "prospectRef" | "channel" | "sourceType" | "sourceRef" | "idempotencyKey" | "text">,
+  request: Pick<OutreachRequest, "contractorAgent" | "prospectType" | "prospectRef" | "channel" | "sourceType" | "sourceRef" | "idempotencyKey" | "text" | "contactFingerprint">,
   status: OutreachOutcome["status"],
   doNotContact = false,
 ): Promise<OutreachOutcome> {
@@ -66,6 +79,7 @@ async function writeOutreachEvent(
         status,
         messageSummary: summarize(request.text),
         doNotContact,
+        contactFingerprint: request.contactFingerprint ?? null,
         idempotencyKey: request.idempotencyKey,
       },
     });
@@ -86,6 +100,9 @@ async function writeOutreachEvent(
 export async function sendAcquisitionOutreach(request: OutreachRequest): Promise<OutreachOutcome> {
   if (await isDoNotContact(request.prospectType, request.prospectRef)) {
     return writeOutreachEvent(request, "DO_NOT_CONTACT");
+  }
+  if (request.contactFingerprint && (await isDoNotContactFingerprint(request.contactFingerprint))) {
+    return writeOutreachEvent(request, "DO_NOT_CONTACT", true);
   }
   if (await recentlyContacted(request.prospectType, request.prospectRef)) {
     return writeOutreachEvent(request, "RATE_LIMITED");
@@ -119,6 +136,9 @@ export async function recordOptOut(params: {
   channel: OutreachRequest["channel"];
   sourceType: OutreachRequest["sourceType"];
   idempotencyKey: string;
+  /** When known, stored so isDoNotContactFingerprint blocks every other
+   * contractor from reaching the same real person (master spec s.4). */
+  contactFingerprint?: string | null;
 }): Promise<OutreachOutcome> {
   return writeOutreachEvent({ ...params, sourceRef: null, text: "prospect requested no further contact" }, "DO_NOT_CONTACT", true);
 }

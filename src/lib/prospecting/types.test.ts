@@ -61,8 +61,8 @@ describe("five contragents (spec s.11) each resolve to a documented handoff targ
     });
   }
 
-  it("only Contragents #1, #2, #5 map onto the existing Prisma AcquisitionProspectType enum today", () => {
-    expect(PROSPECT_TYPES_WITH_EXISTING_SCHEMA_SUPPORT).toEqual(["PASSENGER_DEMAND", "DRIVER_SUPPLY", "BUSINESS_CUSTOMER"]);
+  it("all five contragents now map onto the Prisma AcquisitionProspectType enum", () => {
+    expect(PROSPECT_TYPES_WITH_EXISTING_SCHEMA_SUPPORT).toEqual(ALL_PROSPECT_TYPES);
   });
 });
 

@@ -10,6 +10,8 @@ import { logAgentAction } from "@/lib/agents/trace";
 import { classifyMarketRole, isActionableClassification } from "@/lib/acquisition/role-classifier";
 import { sendAcquisitionOutreach } from "@/lib/acquisition/outreach-log";
 import { computeMarketGap, type MarketGapResult } from "@/lib/rt-office/market-gap";
+import { computeContactFingerprint } from "@/lib/prospecting/identity";
+import { createProspectHandoff } from "@/lib/prospecting/handoff";
 import type { DriverContractorOutcome, DriverSightingInput, DriverSightingSourceType } from "./types";
 
 export const DRIVER_CONTRACTOR_AGENT_CONTRACT: AgentContract = {
@@ -17,11 +19,16 @@ export const DRIVER_CONTRACTOR_AGENT_CONTRACT: AgentContract = {
   mission:
     "Grow verified driver supply: classify public/permitted market sightings for driver intent, import them through SCOUT's existing fingerprint pipeline, and send opt-in-respecting acquisition outreach only when RT OFFICE's Market Gap shows a real driver shortage.",
   inputs: ["raw sighting text + source (permitted channels only)", "RT OFFICE Market Gap priority signal"],
-  outputs: ["ScoutCandidate rows (via SCOUT's existing importScoutCandidate — never a second write path)", "AcquisitionOutreachEvent rows for driver prospects"],
+  outputs: [
+    "ScoutCandidate rows (via SCOUT's existing importScoutCandidate — never a second write path)",
+    "AcquisitionOutreachEvent rows for driver prospects",
+    "ProspectHandoff rows via the shared Prospecting Core (targeting RT_OFFICE)",
+  ],
   permissions: [
     "call scout.importScoutCandidate (SCOUT's existing exclusive ingestion path)",
     "read RT OFFICE's Market Gap (rt-office/market-gap.ts, read-only)",
     "create AcquisitionOutreachEvent (shared outreach ledger, prospectType DRIVER)",
+    "create ProspectHandoff via createProspectHandoff (shared Prospecting Core, never a bespoke handoff)",
     "write AuditLogEntry (agent: DRIVER_CONTRACTOR)",
   ],
   prohibitedActions: [
@@ -31,6 +38,7 @@ export const DRIVER_CONTRACTOR_AGENT_CONTRACT: AgentContract = {
     "never send outreach outside sendAcquisitionOutreach's safety gate (do-not-contact, rate-limit, honest DRY_RUN/SANDBOX/NO_PROVIDER_CONFIGURED exposure)",
     "never invent a market-gap number — always reads rt-office/market-gap.ts's live computation",
     "never contact a prospect with no verifiable contact channel actually present in the source text",
+    "never create a ProspectHandoff outside the approved HANDOFF_TARGETS list for DRIVER_SUPPLY (RT_OFFICE only)",
   ],
   kpi: ["new ANCHOR/REGULAR drivers sourced per HIGH_DRIVER_ACQUISITION_NEED window", "outreach SENT rate vs RATE_LIMITED/DO_NOT_CONTACT"],
   escalationRules: ["a sighting classified below MIN_ACTIONABLE_CONFIDENCE, or not role DRIVER, is never imported — treated as a skip, not a guess"],
@@ -129,18 +137,20 @@ export async function processDriverMarketSighting(ctx: AgentContext, input: Driv
 
   const marketGap: MarketGapResult = await computeMarketGap({ corridorId: input.corridorId });
 
-  const outreach = await maybeSendDriverOutreach(candidate.id, input, marketGap);
+  const outreach = await maybeSendDriverOutreach(ctx, candidate.id, input, marketGap);
 
   return { outcome: "IMPORTED", scoutCandidateId: candidate.id, classification, marketGap, outreach };
 }
 
-async function maybeSendDriverOutreach(scoutCandidateId: string, input: DriverSightingInput, marketGap: MarketGapResult) {
+async function maybeSendDriverOutreach(ctx: AgentContext, scoutCandidateId: string, input: DriverSightingInput, marketGap: MarketGapResult) {
   if (marketGap.priority !== "HIGH_DRIVER_ACQUISITION_NEED") return null;
 
   const target = resolvableOutreachChannel(input);
   if (!target) return null;
 
-  return sendAcquisitionOutreach({
+  const fingerprint = computeContactFingerprint({ phone: input.rawPhone, telegramUsername: input.rawTelegramUsername });
+
+  const outreach = await sendAcquisitionOutreach({
     contractorAgent: "DRIVER_CONTRACTOR",
     prospectType: "DRIVER",
     prospectRef: scoutCandidateId,
@@ -150,7 +160,24 @@ async function maybeSendDriverOutreach(scoutCandidateId: string, input: DriverSi
     to: target.to,
     text: buildDriverOutreachMessage(),
     idempotencyKey: `driver-contractor:${scoutCandidateId}:acquisition-outreach`,
+    contactFingerprint: fingerprint,
   });
+
+  if (outreach.status === "SENT" || outreach.status === "DRY_RUN" || outreach.status === "SANDBOX") {
+    await createProspectHandoff(ctx, {
+      prospectType: "DRIVER_SUPPLY",
+      prospectRef: scoutCandidateId,
+      sourceAgent: "DRIVER_CONTRACTOR",
+      targetAgentOrDepartment: "RT_OFFICE",
+      expressedInterest: "unknown",
+      contactData: target.to,
+      requestedService: input.rawCarModel ?? input.rawRouteText ?? "UNKNOWN",
+      contactFingerprint: fingerprint,
+      idempotencyKey: `driver-contractor:${scoutCandidateId}:handoff:RT_OFFICE`,
+    });
+  }
+
+  return outreach;
 }
 
 /** Read-only priority check for the dispatcher UI / other contractors — never

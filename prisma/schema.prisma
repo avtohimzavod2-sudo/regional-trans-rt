@@ -112,6 +112,8 @@ enum AgentName {
   DRIVER_CONTRACTOR
   PASSENGER_CONTRACTOR
   DELIVERY_CONTRACTOR
+  DELIVERY_EXECUTOR_CONTRACTOR
+  CARGO_CARRIER_CONTRACTOR
 }
 
 enum PaymentMode {
@@ -2332,6 +2334,39 @@ enum AcquisitionProspectType {
   DRIVER
   PASSENGER
   BUSINESS
+  DELIVERY_EXECUTOR
+  CARGO_CARRIER
+}
+
+// Prospecting Core's handoff lifecycle (docs/architecture/prospecting.md).
+// READY never implies acceptance; ownership transfers to the receiving
+// internal contour ONLY on ACCEPTED. ACCEPTED/REJECTED/DUPLICATE are
+// terminal — see src/lib/prospecting/handoff.ts's canTransitionHandoff for
+// the enforced legal-transition table.
+enum HandoffStatus {
+  READY
+  ACCEPTED
+  REJECTED
+  NEEDS_MORE_INFO
+  DUPLICATE
+}
+
+enum DeliveryExecutorProspectStatus {
+  NEW
+  CONTACTED
+  QUALIFIED
+  HANDED_OFF
+  DECLINED
+  SPAM
+}
+
+enum CargoCarrierProspectStatus {
+  NEW
+  CONTACTED
+  QUALIFIED
+  HANDED_OFF
+  DECLINED
+  SPAM
 }
 
 // Master spec s.5's honesty requirement: an outreach adapter must never
@@ -2417,11 +2452,18 @@ model AcquisitionOutreachEvent {
   status          OutreachStatus
   messageSummary  String // never the full message body verbatim — audit-safe summary only
   doNotContact    Boolean                 @default(false)
+  // Normalized cross-type identity signal (phone/handle — see
+  // src/lib/prospecting/identity.ts) so an opt-out recorded by one
+  // acquisition contractor blocks every other contractor from reaching the
+  // same real person under a different prospectType/prospectRef. Optional:
+  // absent for any caller that hasn't supplied one, never backfilled.
+  contactFingerprint String?
   idempotencyKey  String                  @unique
   createdAt       DateTime                @default(now())
 
   @@index([prospectType, prospectRef, createdAt])
   @@index([contractorAgent, createdAt])
+  @@index([contactFingerprint])
 }
 
 // PASSENGER_CONTRACTOR's exclusive write surface — a prospect who has shown
@@ -2493,4 +2535,94 @@ model DeliveryCrmEvent {
 
   @@index([businessProspectId, eventType, createdAt])
   @@index([correctsEventId])
+}
+
+// DELIVERY_EXECUTOR_CONTRACTOR's exclusive write surface (Contragent #3).
+// Explicitly distinct from ScoutCandidate/Driver (passenger-network driver
+// supply) and from Sapar's own operational executor-assignment records — a
+// delivery-executor prospect is a DIFFERENT commercial capability even when
+// the same human could plausibly do both.
+model DeliveryExecutorProspect {
+  id                  String                          @id @default(cuid())
+  sourceType          AcquisitionSourceType
+  sourceGroupId       String?
+  sourceRef           String?
+  sourceText          String
+  rawPhone            String?
+  rawTelegramUsername String?
+  rawVehicleText      String?
+  rawZonesText        String?
+  normalizedPhone     String?
+  status              DeliveryExecutorProspectStatus @default(NEW)
+  handedOffAt         DateTime?
+  createdAt           DateTime                        @default(now())
+  updatedAt           DateTime                        @updatedAt
+
+  @@index([status, createdAt])
+  @@index([normalizedPhone])
+}
+
+// CARGO_CARRIER_CONTRACTOR's exclusive write surface (Contragent #4).
+// Capability fields below are unverified prospect CLAIMS only — never
+// promoted automatically into Partner Registry's TransportAsset facts,
+// which require normal onboarding/verification (docs/architecture/partner-registry.md).
+model CargoCarrierProspect {
+  id                       String                      @id @default(cuid())
+  sourceType               AcquisitionSourceType
+  sourceGroupId            String?
+  sourceRef                String?
+  sourceText               String
+  rawPhone                 String?
+  rawTelegramUsername      String?
+  rawVehicleText           String?
+  rawCapacityText          String?
+  rawRouteText             String?
+  rawTemperatureCapability Boolean?
+  rawBackhaulText          String?
+  normalizedPhone          String?
+  status                   CargoCarrierProspectStatus @default(NEW)
+  handedOffAt              DateTime?
+  createdAt                DateTime                    @default(now())
+  updatedAt                DateTime                    @updatedAt
+
+  @@index([status, createdAt])
+  @@index([normalizedPhone])
+}
+
+// Prospecting Core's own, additive persistence for the shared handoff
+// lifecycle (docs/architecture/prospecting.md). Never a second source of
+// truth for any contragent's prospect data — prospectRef is a loose
+// correlation id into whichever prospect model actually owns that record
+// (PassengerProspect / ScoutCandidate / BusinessProspect /
+// DeliveryExecutorProspect / CargoCarrierProspect), same idiom as
+// AcquisitionOutreachEvent.prospectRef. Creating a READY row never implies
+// acceptance; ownership transfers to targetAgentOrDepartment only once
+// status becomes ACCEPTED (src/lib/prospecting/handoff.ts).
+model ProspectHandoff {
+  id                      String                  @id @default(cuid())
+  prospectType            AcquisitionProspectType
+  prospectRef             String
+  sourceAgent             AgentName
+  targetAgentOrDepartment String
+  status                  HandoffStatus           @default(READY)
+  expressedInterest       String?
+  summary                 String?
+  contactData             String?
+  requestedService        String?
+  availableCapabilities   String[]
+  conversationReference   String?
+  sourceReferences        String[]
+  contactFingerprint      String?
+  decisionNote            String?
+  decidedBy               String?
+  idempotencyKey          String                  @unique
+  createdAt               DateTime                @default(now())
+  updatedAt               DateTime                @updatedAt
+  acceptedAt              DateTime?
+  rejectedAt              DateTime?
+
+  @@index([prospectType, prospectRef, status])
+  @@index([status, createdAt])
+  @@index([targetAgentOrDepartment, status])
+  @@index([contactFingerprint])
 }

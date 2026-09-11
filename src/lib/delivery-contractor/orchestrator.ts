@@ -9,7 +9,17 @@ import type { AgentContext, AgentContract } from "@/lib/agents/types";
 import { logAgentAction } from "@/lib/agents/trace";
 import { classifyMarketRole, isActionableClassification } from "@/lib/acquisition/role-classifier";
 import { sendAcquisitionOutreach } from "@/lib/acquisition/outreach-log";
-import { canTransitionBusinessProspect, createBusinessProspect, findExistingBusinessProspect, guessBusinessCategory, linkBusinessProspectToPartner, transitionBusinessProspectStatus } from "./prospect";
+import { computeContactFingerprint } from "@/lib/prospecting/identity";
+import { createProspectHandoff } from "@/lib/prospecting/handoff";
+import {
+  canTransitionBusinessProspect,
+  createBusinessProspect,
+  findExistingBusinessProspect,
+  getBusinessProspectById,
+  guessBusinessCategory,
+  linkBusinessProspectToPartner,
+  transitionBusinessProspectStatus,
+} from "./prospect";
 import { recordDeliveryCrmEvent } from "./crm";
 import type { BusinessSightingInput, DeliveryContractorOutcome } from "./types";
 
@@ -22,11 +32,17 @@ export const DELIVERY_CONTRACTOR_AGENT_CONTRACT: AgentContract = {
     "dispatcher-triggered lifecycle decisions (qualify / partner / decline / handoff)",
     "Mira's inbound partner/business-inquiry classification (bounded — Mira never re-classifies, never sends outreach on this agent's behalf)",
   ],
-  outputs: ["BusinessProspect rows (its own exclusive model)", "DeliveryCrmEvent rows (its own append-only log)", "AcquisitionOutreachEvent rows for business prospects"],
+  outputs: [
+    "BusinessProspect rows (its own exclusive model)",
+    "DeliveryCrmEvent rows (its own append-only log)",
+    "AcquisitionOutreachEvent rows for business prospects",
+    "ProspectHandoff rows via the shared Prospecting Core (targeting ZHOLAMAN/SAPAR/CARGO_OPERATIONS)",
+  ],
   permissions: [
     "create/update BusinessProspect (its own exclusive write surface)",
     "create DeliveryCrmEvent (its own exclusive append-only write surface)",
     "create AcquisitionOutreachEvent (shared outreach ledger, prospectType BUSINESS)",
+    "create ProspectHandoff via createProspectHandoff (shared Prospecting Core, never a bespoke handoff)",
     "write AuditLogEntry (agent: DELIVERY_CONTRACTOR)",
   ],
   prohibitedActions: [
@@ -37,6 +53,7 @@ export const DELIVERY_CONTRACTOR_AGENT_CONTRACT: AgentContract = {
     "never send outreach outside sendAcquisitionOutreach's safety gate",
     "never update or delete a DeliveryCrmEvent row — a mistaken fact is only ever corrected by appending a new CORRECTION event referencing it",
     "never force an illegal BusinessProspect lifecycle transition (see prospect.ts's canTransitionBusinessProspect)",
+    "never create a ProspectHandoff outside the approved HANDOFF_TARGETS list for BUSINESS_CUSTOMER",
   ],
   kpi: ["business prospects reaching PARTNERED status", "% of DeliveryCrmEvent appends that are clean (non-duplicate)"],
   escalationRules: ["a sighting classified below MIN_ACTIONABLE_CONFIDENCE, or not role BUSINESS_ADVERTISEMENT, is never turned into a prospect", "an illegal lifecycle transition is rejected rather than forced"],
@@ -220,16 +237,52 @@ export async function recordInboundBusinessProspect(
   return { prospectId: prospect.id, created: true };
 }
 
-/** Marks the business as live in Sapar's operational delivery flow — an
- * append-only handoff record, never a Shipment write itself. */
-export async function handoffBusinessToOperations(ctx: AgentContext, prospectId: string, details?: Record<string, unknown>) {
+/** Marks the business as live in operations through the shared Prospecting
+ * Core (never a bespoke handoff mechanism) and keeps appending to the
+ * Delivery CRM's own append-only relationship history — the two serve
+ * different purposes: the ProspectHandoff row is the cross-contragent
+ * ownership-transfer record the receiving department accepts/rejects, the
+ * DeliveryCrmEvent is this contractor's permanent audit trail of the
+ * business relationship, which predates and outlives any single handoff. */
+export async function handoffBusinessToOperations(
+  ctx: AgentContext,
+  prospectId: string,
+  targetAgentOrDepartment: "ZHOLAMAN" | "SAPAR" | "CARGO_OPERATIONS",
+  details?: Record<string, unknown>,
+) {
+  const prospect = await getBusinessProspectById(prospectId);
+  if (!prospect) {
+    throw new Error(`Delivery Contractor rejected handoff: unknown BusinessProspect ${prospectId}`);
+  }
+
+  const fingerprint = computeContactFingerprint({ phone: prospect.contactPhone, telegramUsername: prospect.contactHandle });
+
+  const { handoff, deduplicated } = await createProspectHandoff(ctx, {
+    prospectType: "BUSINESS_CUSTOMER",
+    prospectRef: prospectId,
+    sourceAgent: "DELIVERY_CONTRACTOR",
+    targetAgentOrDepartment,
+    expressedInterest: "yes",
+    contactData: prospect.contactPhone ?? prospect.contactHandle ?? "UNKNOWN",
+    requestedService: prospect.businessName ?? prospect.category,
+    contactFingerprint: fingerprint,
+    idempotencyKey: `delivery-contractor:${prospectId}:handoff:${targetAgentOrDepartment}`,
+  });
+
   const outcome = await recordDeliveryCrmEvent({
     businessProspectId: prospectId,
     eventType: "HANDOFF_TO_OPERATIONS",
     source: "DELIVERY_CONTRACTOR",
-    details,
+    details: { ...details, targetAgentOrDepartment, handoffId: handoff.id, deduplicated },
     idempotencyKey: `delivery-contractor:${prospectId}:handoff-to-operations`,
   });
-  await logAgentAction({ ctx, agent: "DELIVERY_CONTRACTOR", action: "delivery_contractor.handoff_to_operations", entityType: "BusinessProspect", entityId: prospectId, details });
-  return outcome;
+  await logAgentAction({
+    ctx,
+    agent: "DELIVERY_CONTRACTOR",
+    action: "delivery_contractor.handoff_to_operations",
+    entityType: "BusinessProspect",
+    entityId: prospectId,
+    details: { targetAgentOrDepartment, ...details },
+  });
+  return { ...outcome, handoff, deduplicated };
 }

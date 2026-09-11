@@ -25,6 +25,8 @@ graph TD
     DRIVERC["DRIVER_CONTRACTOR — driver acquisition\ncriticality: LOW"]
     PASSC["PASSENGER_CONTRACTOR — passenger acquisition\ncriticality: LOW"]
     DELIVC["DELIVERY_CONTRACTOR — Delivery CRM\ncriticality: LOW"]
+    DELIVEXC["DELIVERY_EXECUTOR_CONTRACTOR — delivery executor acquisition\ncriticality: LOW"]
+    CARGOC["CARGO_CARRIER_CONTRACTOR — cargo carrier acquisition\ncriticality: LOW"]
 
     ARTUR --> MIRA
     ARTUR --> SAPAR
@@ -35,6 +37,8 @@ graph TD
     ARTUR --> DRIVERC
     ARTUR --> PASSC
     ARTUR --> DELIVC
+    ARTUR --> DELIVEXC
+    ARTUR --> CARGOC
 
     SAPARGUL -. reportsTo .-> TYYIN
 
@@ -50,6 +54,8 @@ graph TD
     DRIVERC -.imports via.-> SAPARP
     PASSC -.hands off qualified prospect.-> MIRA
     DELIVC -.bounded inbound prospect.-> MIRA
+    DELIVEXC -.hands off qualified prospect.-> SAPAR
+    CARGOC -.hands off qualified prospect.-> SAPAR
 
     classDef critical fill:#7a1f1f,stroke:#f66,color:#fff;
     classDef high fill:#5a4b1f,stroke:#fc6,color:#fff;
@@ -83,6 +89,8 @@ spec s.0.3 ("do not rewrite working systems unnecessarily").
 | DRIVER_CONTRACTOR | Grows verified driver supply from public/permitted sightings via SCOUT's existing pipeline, gated by Market Gap | ARTUR | LOW |
 | PASSENGER_CONTRACTOR | Grows passenger demand from public/permitted sightings (`PassengerProspect`), hands qualified prospects to Mira | ARTUR | LOW |
 | DELIVERY_CONTRACTOR | Grows the delivery business-partnership pipeline (`BusinessProspect` + Delivery CRM `DeliveryCrmEvent`) | ARTUR | LOW |
+| DELIVERY_EXECUTOR_CONTRACTOR | Grows delivery-executor (courier/local van) supply from public/permitted sightings (`DeliveryExecutorProspect`), hands qualified prospects to Sapar/Delivery Operations | ARTUR | LOW |
+| CARGO_CARRIER_CONTRACTOR | Grows cargo-carrier (freight/truck) supply from public/permitted sightings (`CargoCarrierProspect`); claimed capacity/backhaul stays unverified free text until Cargo Operations confirms it | ARTUR | LOW |
 | JOLCHU | Route/geo resolution | — | — |
 | COMMAND / PASSENGER / DRIVER / MATCH / ROUTE / TRUST / PAY / SUPPORT / PARCEL / SCOUT / QUALITY / ANALYTICS / NETWORK | Passenger-side matching/dispatch stack | — | — |
 
@@ -359,16 +367,22 @@ the passenger-facing read path (`SupplyFact`, s.4/`facts.ts`) is built from
 `details` blob — so a driver's free-text report can never leak verbatim to
 a passenger.
 
-## 6. Market Acquisition Contractors — Driver / Passenger / Delivery
+## 6. Market Acquisition Contractors — five contragents, one Prospecting Core
 
-Three LOW-criticality agents, all reporting to Artur, all read Market Gap
-(`docs/AGENT_CONSTITUTION.md` s.8) rather than inventing their own
-demand/supply number, and all route every outbound message through the
-shared, safety-gated `sendAcquisitionOutreach` adapter
-(`src/lib/acquisition/`) — rate-limited, deduplicated, do-not-contact aware,
-and honest about non-delivery (`DRY_RUN`/`SANDBOX`/`NO_PROVIDER_CONFIGURED`
-are real states surfaced to the dispatcher, never silently reported as a
-successful send).
+Five LOW-criticality agents, all reporting to Artur, all route every
+outbound message through the shared, safety-gated `sendAcquisitionOutreach`
+adapter (`src/lib/acquisition/`) — rate-limited, deduplicated, do-not-contact
+aware (including a cross-contragent `contactFingerprint` check so an
+opt-out recorded by any one contractor blocks every other contractor from
+reaching the same real person), and honest about non-delivery
+(`DRY_RUN`/`SANDBOX`/`NO_PROVIDER_CONFIGURED` are real states surfaced to
+the dispatcher, never silently reported as a successful send). Once a
+prospect is qualified, every contractor hands off through the shared
+Prospecting Core (`src/lib/prospecting/handoff.ts`'s `createProspectHandoff`
+/ `acceptProspectHandoff`) rather than a bespoke handoff of its own — see
+[docs/architecture/prospecting.md](./architecture/prospecting.md) for the
+full contract. A contractor's involvement ends at handoff: it never remains
+operationally involved once the target department accepts.
 
 - **DRIVER_CONTRACTOR** classifies public/permitted driver sightings and
   imports them through **SCOUT's existing fingerprint pipeline** — there is
@@ -391,6 +405,17 @@ successful send).
   (Sapar's individual cargo execution record). Once a `HANDOFF_TO_OPERATIONS`
   event is appended, real deliveries flow through Sapar's existing shipment
   lifecycle, not through a second one here.
+- **DELIVERY_EXECUTOR_CONTRACTOR** classifies public/permitted courier/local-
+  van sightings into its own `DeliveryExecutorProspect` model and hands a
+  qualified prospect to Sapar/Delivery Operations via the Prospecting Core.
+  Claimed zone/coverage text is carried as free-text `availableCapabilities`
+  on the handoff, never written as a verified `Partner`/`TransportAsset` fact.
+- **CARGO_CARRIER_CONTRACTOR** classifies public/permitted truck/freight
+  sightings into its own `CargoCarrierProspect` model. A prospect's stated
+  tonnage, temperature-control, and backhaul (`обратка`) claims are carried
+  as unverified free text on the handoff, exactly like Delivery Executor
+  above — Cargo Operations, not this contractor, decides whether a claim
+  becomes a trusted Partner Registry fact.
 
 **Mira's two bounded touchpoints** with this pipeline (both read-only from
 Mira's side — she never writes `BusinessProspect`/`DeliveryCrmEvent` and
@@ -414,7 +439,10 @@ Dispatcher visibility: `/dispatcher/market-gap` (the live network-wide gap),
 `/dispatcher/driver-contractor`, `/dispatcher/passenger-contractor`, and
 `/dispatcher/delivery-contractor` are all read-only views — the same
 pattern as `/dispatcher/drive-crm` and `/dispatcher/rt-office` — backed by
-each contractor's own `bridge.ts`.
+each contractor's own `bridge.ts`. Delivery Executor and Cargo Carrier have
+no dedicated per-contractor dispatcher page yet; `/dispatcher/prospecting`
+is the one shared, cross-contragent feed (`recentProspectHandoffs()`) that
+already surfaces their handoffs alongside every other contragent's.
 
 ## 7. Booking Lifecycle — the passenger-driver core loop (MATCH)
 

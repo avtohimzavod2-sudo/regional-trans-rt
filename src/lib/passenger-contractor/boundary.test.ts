@@ -31,6 +31,9 @@ const FORBIDDEN_CALL_SUBSTRINGS = [
   "db.scoutCandidate.create",
   "db.driveCrmEvent.create",
   "db.acquisitionOutreachEvent.create",
+  "db.prospectHandoff.create",
+  "db.prospectHandoff.update",
+  "db.prospectHandoff.updateMany",
   "db.rtBalance",
   "db.ledgerEntry",
 ];

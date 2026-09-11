@@ -5,19 +5,23 @@ const {
   createBusinessProspectMock,
   transitionBusinessProspectStatusMock,
   linkBusinessProspectToPartnerMock,
+  getBusinessProspectByIdMock,
   logAgentActionMock,
   classifyMarketRoleMock,
   sendAcquisitionOutreachMock,
   recordDeliveryCrmEventMock,
+  createProspectHandoffMock,
 } = vi.hoisted(() => ({
   findExistingBusinessProspectMock: vi.fn(),
   createBusinessProspectMock: vi.fn(),
   transitionBusinessProspectStatusMock: vi.fn(),
   linkBusinessProspectToPartnerMock: vi.fn(),
+  getBusinessProspectByIdMock: vi.fn(),
   logAgentActionMock: vi.fn().mockResolvedValue(undefined),
   classifyMarketRoleMock: vi.fn(),
   sendAcquisitionOutreachMock: vi.fn(),
   recordDeliveryCrmEventMock: vi.fn().mockResolvedValue({ eventId: "evt-1", deduplicated: false }),
+  createProspectHandoffMock: vi.fn(),
 }));
 
 vi.mock("./prospect", async () => {
@@ -28,6 +32,7 @@ vi.mock("./prospect", async () => {
     createBusinessProspect: createBusinessProspectMock,
     transitionBusinessProspectStatus: transitionBusinessProspectStatusMock,
     linkBusinessProspectToPartner: linkBusinessProspectToPartnerMock,
+    getBusinessProspectById: getBusinessProspectByIdMock,
   };
 });
 vi.mock("./crm", () => ({ recordDeliveryCrmEvent: recordDeliveryCrmEventMock }));
@@ -37,8 +42,12 @@ vi.mock("@/lib/acquisition/role-classifier", async () => {
   return { ...actual, classifyMarketRole: classifyMarketRoleMock };
 });
 vi.mock("@/lib/acquisition/outreach-log", () => ({ sendAcquisitionOutreach: sendAcquisitionOutreachMock }));
+vi.mock("@/lib/prospecting/handoff", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/prospecting/handoff")>("@/lib/prospecting/handoff");
+  return { ...actual, createProspectHandoff: createProspectHandoffMock };
+});
 
-import { agreeBusinessPartnership, processBusinessMarketSighting, qualifyBusinessProspect } from "./orchestrator";
+import { agreeBusinessPartnership, handoffBusinessToOperations, processBusinessMarketSighting, qualifyBusinessProspect } from "./orchestrator";
 
 const CTX = { traceId: "trace-1", hop: 0 };
 
@@ -146,5 +155,42 @@ describe("BusinessProspect lifecycle transitions", () => {
     expect(linkBusinessProspectToPartnerMock).toHaveBeenCalledWith("biz-1", "partner-1");
     expect(result).toEqual({ id: "biz-1", status: "PARTNERED", linkedPartnerId: "partner-1" });
     expect(recordDeliveryCrmEventMock).toHaveBeenCalledWith(expect.objectContaining({ eventType: "PARTNERSHIP_AGREED", details: { linkedPartnerId: "partner-1" } }));
+  });
+});
+
+describe("handoffBusinessToOperations", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    createProspectHandoffMock.mockResolvedValue({ handoff: { id: "handoff-1", status: "READY" }, deduplicated: false });
+  });
+
+  it("rejects a handoff for an unknown BusinessProspect without touching the shared core", async () => {
+    getBusinessProspectByIdMock.mockResolvedValue(null);
+
+    await expect(handoffBusinessToOperations(CTX, "biz-missing", "CARGO_OPERATIONS")).rejects.toThrow(/unknown BusinessProspect/);
+    expect(createProspectHandoffMock).not.toHaveBeenCalled();
+  });
+
+  it("hands a qualified business off to CARGO_OPERATIONS through the shared Prospecting Core and appends a Delivery CRM event", async () => {
+    getBusinessProspectByIdMock.mockResolvedValue({ id: "biz-1", businessName: "Азык-түлүк дүкөнү", category: "GROCERY", contactPhone: "996700123456", contactHandle: null });
+
+    const outcome = await handoffBusinessToOperations(CTX, "biz-1", "CARGO_OPERATIONS", { note: "confirmed volume" });
+
+    expect(createProspectHandoffMock).toHaveBeenCalledWith(
+      CTX,
+      expect.objectContaining({
+        prospectType: "BUSINESS_CUSTOMER",
+        prospectRef: "biz-1",
+        sourceAgent: "DELIVERY_CONTRACTOR",
+        targetAgentOrDepartment: "CARGO_OPERATIONS",
+        contactData: "996700123456",
+        requestedService: "Азык-түлүк дүкөнү",
+        contactFingerprint: "phone:996700123456",
+      }),
+    );
+    expect(recordDeliveryCrmEventMock).toHaveBeenCalledWith(
+      expect.objectContaining({ businessProspectId: "biz-1", eventType: "HANDOFF_TO_OPERATIONS", details: expect.objectContaining({ note: "confirmed volume", targetAgentOrDepartment: "CARGO_OPERATIONS", handoffId: "handoff-1" }) }),
+    );
+    expect(outcome.handoff).toEqual({ id: "handoff-1", status: "READY" });
   });
 });

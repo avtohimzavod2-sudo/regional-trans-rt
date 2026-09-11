@@ -12,6 +12,8 @@ import { logAgentAction } from "@/lib/agents/trace";
 import { classifyMarketRole, isActionableClassification } from "@/lib/acquisition/role-classifier";
 import { sendAcquisitionOutreach } from "@/lib/acquisition/outreach-log";
 import { computeMarketGap, type MarketGapResult } from "@/lib/rt-office/market-gap";
+import { computeContactFingerprint } from "@/lib/prospecting/identity";
+import { createProspectHandoff } from "@/lib/prospecting/handoff";
 import { createPassengerProspect, findExistingProspect, markProspectContacted } from "./prospect";
 import type { PassengerContractorOutcome, PassengerSightingInput } from "./types";
 
@@ -20,11 +22,16 @@ export const PASSENGER_CONTRACTOR_AGENT_CONTRACT: AgentContract = {
   mission:
     "Grow passenger demand when RT OFFICE's Market Gap shows verified driver supply exceeding demand: classify public/permitted market sightings for passenger intent, track them in PassengerProspect, and hand qualified prospects off to Mira rather than ever messaging as Mira itself.",
   inputs: ["raw sighting text + source (permitted channels only)", "RT OFFICE Market Gap priority signal"],
-  outputs: ["PassengerProspect rows (its own exclusive model)", "AcquisitionOutreachEvent rows for passenger prospects, always pointing the prospect to message Mira"],
+  outputs: [
+    "PassengerProspect rows (its own exclusive model)",
+    "AcquisitionOutreachEvent rows for passenger prospects, always pointing the prospect to message Mira",
+    "ProspectHandoff rows via the shared Prospecting Core (targeting MIRA/PASSENGER_OPERATIONS/AKZHOL)",
+  ],
   permissions: [
     "create/update PassengerProspect (its own exclusive write surface)",
     "read RT OFFICE's Market Gap (rt-office/market-gap.ts, read-only)",
     "create AcquisitionOutreachEvent (shared outreach ledger, prospectType PASSENGER)",
+    "create ProspectHandoff via createProspectHandoff (shared Prospecting Core, never a bespoke handoff)",
     "write AuditLogEntry (agent: PASSENGER_CONTRACTOR)",
   ],
   prohibitedActions: [
@@ -34,6 +41,7 @@ export const PASSENGER_CONTRACTOR_AGENT_CONTRACT: AgentContract = {
     "never send outreach outside sendAcquisitionOutreach's safety gate (do-not-contact, rate-limit, honest DRY_RUN/SANDBOX/NO_PROVIDER_CONFIGURED exposure)",
     "never invent a market-gap number — always reads rt-office/market-gap.ts's live computation",
     "never create a duplicate PassengerProspect for a contact signal already on file",
+    "never create a ProspectHandoff outside the approved HANDOFF_TARGETS list for PASSENGER_DEMAND",
   ],
   kpi: ["passenger prospects that reach CONVERTED status per PASSENGER_ACQUISITION_NEED window", "outreach SENT rate vs RATE_LIMITED/DO_NOT_CONTACT"],
   escalationRules: ["a sighting classified below MIN_ACTIONABLE_CONFIDENCE, or not role PASSENGER, is never turned into a prospect — treated as a skip, not a guess"],
@@ -100,16 +108,18 @@ export async function processPassengerMarketSighting(ctx: AgentContext, input: P
   });
 
   const marketGap: MarketGapResult = await computeMarketGap({ corridorId: input.corridorId });
-  const outreach = await maybeSendPassengerOutreach(prospect.id, input, marketGap);
+  const outreach = await maybeSendPassengerOutreach(ctx, prospect.id, input, marketGap);
 
   return { outcome: "PROSPECT_CREATED", prospect, classification, marketGap, outreach };
 }
 
-async function maybeSendPassengerOutreach(prospectId: string, input: PassengerSightingInput, marketGap: MarketGapResult) {
+async function maybeSendPassengerOutreach(ctx: AgentContext, prospectId: string, input: PassengerSightingInput, marketGap: MarketGapResult) {
   if (marketGap.priority !== "PASSENGER_ACQUISITION_NEED") return null;
 
   const target = resolvableOutreachChannel(input);
   if (!target) return null;
+
+  const fingerprint = computeContactFingerprint({ phone: input.rawPhone, telegramUsername: input.rawTelegramUsername });
 
   const outreach = await sendAcquisitionOutreach({
     contractorAgent: "PASSENGER_CONTRACTOR",
@@ -121,9 +131,25 @@ async function maybeSendPassengerOutreach(prospectId: string, input: PassengerSi
     to: target.to,
     text: buildPassengerOutreachMessage(),
     idempotencyKey: `passenger-contractor:${prospectId}:acquisition-outreach`,
+    contactFingerprint: fingerprint,
   });
 
   await markProspectContacted(prospectId);
+
+  if (outreach.status === "SENT" || outreach.status === "DRY_RUN" || outreach.status === "SANDBOX") {
+    await createProspectHandoff(ctx, {
+      prospectType: "PASSENGER_DEMAND",
+      prospectRef: prospectId,
+      sourceAgent: "PASSENGER_CONTRACTOR",
+      targetAgentOrDepartment: "MIRA",
+      expressedInterest: "unknown",
+      contactData: target.to,
+      requestedService: input.rawRouteText ?? "UNKNOWN",
+      contactFingerprint: fingerprint,
+      idempotencyKey: `passenger-contractor:${prospectId}:handoff:MIRA`,
+    });
+  }
+
   return outreach;
 }
 

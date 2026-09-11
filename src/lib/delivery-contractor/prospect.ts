@@ -102,3 +102,10 @@ export async function transitionBusinessProspectStatus(prospectId: string, next:
 export async function linkBusinessProspectToPartner(prospectId: string, partnerId: string): Promise<BusinessProspect> {
   return db.businessProspect.update({ where: { id: prospectId }, data: { linkedPartnerId: partnerId } });
 }
+
+/** Read-only lookup used by handoffBusinessToOperations to resolve the
+ * prospect's contact/service details for the shared ProspectHandoff — never
+ * a second source of truth, just a fetch of this module's own model. */
+export async function getBusinessProspectById(prospectId: string): Promise<BusinessProspect | null> {
+  return db.businessProspect.findUnique({ where: { id: prospectId } });
+}

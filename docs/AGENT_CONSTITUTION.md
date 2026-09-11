@@ -44,6 +44,8 @@ contract):
 | `driver_acquisition_outreach` | DRIVER_CONTRACTOR |
 | `passenger_prospect_write` | PASSENGER_CONTRACTOR |
 | `business_prospect_write`, `delivery_crm_event_write` | DELIVERY_CONTRACTOR |
+| `delivery_executor_prospect_write` | DELIVERY_EXECUTOR_CONTRACTOR |
+| `cargo_carrier_prospect_write` | CARGO_CARRIER_CONTRACTOR |
 
 ## 3. Role-boundary preservation
 

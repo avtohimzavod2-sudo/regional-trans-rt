@@ -9,30 +9,34 @@
 // spec's 5-way ProspectType vocabulary and the ProspectHandoff contract —
 // this file adds exactly those two things, nothing else.
 //
-// `AcquisitionProspectType` (prisma/schema.prisma) only has three values
-// today: DRIVER, PASSENGER, BUSINESS — mapping onto spec Contragents #1, #2,
-// #5. Contragents #3 (Delivery Executor Acquisition) and #4 (Cargo Carrier
-// Acquisition) have no Prisma enum value yet; per spec s.23 ("do not name the
-// future Cargo agent", "do not overbuild"), this stage does not add one.
-// `ProspectType` below is the full 5-way vocabulary a future
-// DELIVERY_EXECUTOR_CONTRACTOR/CARGO_CARRIER_CONTRACTOR pair would use; the
-// two Prisma-backed members must stay string-identical to
-// `AcquisitionProspectType` so a future migration is a pure additive enum
-// extension, never a rename.
+// `AcquisitionProspectType` (prisma/schema.prisma) now has all five values:
+// DRIVER, PASSENGER, BUSINESS, DELIVERY_EXECUTOR, CARGO_CARRIER — mapping
+// onto spec Contragents #1-#5 respectively. The two Prisma-backed vocabularies
+// are not string-identical (`ProspectType` below vs `AcquisitionProspectType`);
+// handoff.ts's toAcquisitionProspectType/fromAcquisitionProspectType is the
+// single explicit mapping point between them.
 import type { Known } from "../cargo-profile/types";
 
 /** The five prospecting contragents from spec s.11, in their numbered order. */
 export type ProspectType =
   | "PASSENGER_DEMAND" // Contragent #1 -> handoff target: Mira / Passenger Operations / Akzhol
   | "DRIVER_SUPPLY" // Contragent #2 -> handoff target: RT OFFICE
-  | "DELIVERY_EXECUTOR_SUPPLY" // Contragent #3 (no Prisma enum yet) -> handoff target: Sapar / Delivery Operations
-  | "CARGO_CARRIER_SUPPLY" // Contragent #4 (no Prisma enum yet) -> handoff target: Cargo Operations
+  | "DELIVERY_EXECUTOR_SUPPLY" // Contragent #3 -> handoff target: Sapar / Delivery Operations
+  | "CARGO_CARRIER_SUPPLY" // Contragent #4 -> handoff target: Cargo Operations
   | "BUSINESS_CUSTOMER"; // Contragent #5 -> handoff target: Zholaman (small delivery) or Cargo Operations (freight)
 
-/** `AcquisitionProspectType` members this ProspectType already has a live
- * Prisma-backed home for. The other three ProspectType values are documented
- * extension points only — see module header. */
-export const PROSPECT_TYPES_WITH_EXISTING_SCHEMA_SUPPORT: readonly ProspectType[] = ["PASSENGER_DEMAND", "DRIVER_SUPPLY", "BUSINESS_CUSTOMER"];
+/** All five ProspectType values now have a live Prisma-backed
+ * AcquisitionProspectType home (see handoff.ts's mapping functions).
+ * Retained as an explicit, tested list rather than inferred from the
+ * ProspectType union, so a future genuinely-unbacked addition is caught by
+ * types.test.ts rather than silently assumed to have schema support. */
+export const PROSPECT_TYPES_WITH_EXISTING_SCHEMA_SUPPORT: readonly ProspectType[] = [
+  "PASSENGER_DEMAND",
+  "DRIVER_SUPPLY",
+  "DELIVERY_EXECUTOR_SUPPLY",
+  "CARGO_CARRIER_SUPPLY",
+  "BUSINESS_CUSTOMER",
+];
 
 export type ProspectStatus = "DISCOVERED" | "QUALIFIED" | "CONTACTED" | "RESPONDED" | "HANDED_OFF" | "OPTED_OUT" | "REJECTED" | "DUPLICATE";
 

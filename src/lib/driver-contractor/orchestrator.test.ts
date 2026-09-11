@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { importScoutCandidateMock, logAgentActionMock, classifyMarketRoleMock, sendAcquisitionOutreachMock, computeMarketGapMock } = vi.hoisted(() => ({
+const { importScoutCandidateMock, logAgentActionMock, classifyMarketRoleMock, sendAcquisitionOutreachMock, computeMarketGapMock, createProspectHandoffMock } = vi.hoisted(() => ({
   importScoutCandidateMock: vi.fn(),
   logAgentActionMock: vi.fn().mockResolvedValue(undefined),
   classifyMarketRoleMock: vi.fn(),
   sendAcquisitionOutreachMock: vi.fn(),
   computeMarketGapMock: vi.fn(),
+  createProspectHandoffMock: vi.fn(),
 }));
 
 vi.mock("@/lib/agents/scout", async () => {
@@ -19,6 +20,10 @@ vi.mock("@/lib/acquisition/role-classifier", async () => {
 });
 vi.mock("@/lib/acquisition/outreach-log", () => ({ sendAcquisitionOutreach: sendAcquisitionOutreachMock }));
 vi.mock("@/lib/rt-office/market-gap", () => ({ computeMarketGap: computeMarketGapMock }));
+vi.mock("@/lib/prospecting/handoff", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/prospecting/handoff")>("@/lib/prospecting/handoff");
+  return { ...actual, createProspectHandoff: createProspectHandoffMock };
+});
 
 import { processDriverMarketSighting } from "./orchestrator";
 
@@ -54,6 +59,7 @@ describe("processDriverMarketSighting", () => {
       corridorId: null,
       asOf: "2026-09-09T00:00:00.000Z",
     });
+    createProspectHandoffMock.mockResolvedValue({ handoff: { id: "handoff-1", status: "READY" }, deduplicated: false });
   });
 
   it("skips a non-driver sighting without ever calling SCOUT's import path", async () => {
@@ -63,6 +69,34 @@ describe("processDriverMarketSighting", () => {
 
     expect(outcome.outcome).toBe("SKIPPED_NOT_A_DRIVER_SIGHTING");
     expect(importScoutCandidateMock).not.toHaveBeenCalled();
+  });
+
+  it("M: skips a DELIVERY_EXECUTOR-classified sighting — a courier offering is not a driver-supply prospect", async () => {
+    classifyMarketRoleMock.mockResolvedValue({ role: "DELIVERY_EXECUTOR", language: "RU", confidence: 0.9, originText: null, destinationText: null, departureTimeText: null, passengerCount: null, seatsAvailable: null, vehicleText: null, cargoDescription: null, businessCategoryGuess: null, capacityText: null, temperatureCapability: null, backhaulText: null, zonesText: "по городу" });
+
+    const outcome = await processDriverMarketSighting(CTX, { sourceType: "TELEGRAM_GROUP", sourceText: "Курьер, доставлю документы/посылки по городу" });
+
+    expect(outcome.outcome).toBe("SKIPPED_NOT_A_DRIVER_SIGHTING");
+    expect(importScoutCandidateMock).not.toHaveBeenCalled();
+  });
+
+  it("N: skips a CARGO_CARRIER-classified sighting — freight capacity is not a driver-supply prospect", async () => {
+    classifyMarketRoleMock.mockResolvedValue({ role: "CARGO_CARRIER", language: "RU", confidence: 0.9, originText: "Бишкек", destinationText: "Ош", departureTimeText: null, passengerCount: null, seatsAvailable: null, vehicleText: null, cargoDescription: null, businessCategoryGuess: null, capacityText: "20 тонн", temperatureCapability: false, backhaulText: "есть обратка", zonesText: null });
+
+    const outcome = await processDriverMarketSighting(CTX, { sourceType: "TELEGRAM_GROUP", sourceText: "Фура 20 тонн Бишкек–Ош, есть обратка" });
+
+    expect(outcome.outcome).toBe("SKIPPED_NOT_A_DRIVER_SIGHTING");
+    expect(importScoutCandidateMock).not.toHaveBeenCalled();
+  });
+
+  it("Q: skips an AMBIGUOUS-classified sighting even at high stated confidence — never guesses", async () => {
+    classifyMarketRoleMock.mockResolvedValue({ role: "AMBIGUOUS", language: "KY", confidence: 0.9, originText: "Каракол", destinationText: "Бишкек", departureTimeText: "эрте", passengerCount: null, seatsAvailable: null, vehicleText: null, cargoDescription: null, businessCategoryGuess: null, capacityText: null, temperatureCapability: null, backhaulText: null, zonesText: null });
+
+    const outcome = await processDriverMarketSighting(CTX, { sourceType: "TELEGRAM_GROUP", sourceText: "каракол бишкек эрте" });
+
+    expect(outcome.outcome).toBe("SKIPPED_NOT_A_DRIVER_SIGHTING");
+    expect(importScoutCandidateMock).not.toHaveBeenCalled();
+    expect(sendAcquisitionOutreachMock).not.toHaveBeenCalled();
   });
 
   it("skips a low-confidence classification even if it guesses DRIVER — never imports on an unreliable guess", async () => {
@@ -117,7 +151,20 @@ describe("processDriverMarketSighting", () => {
     if (outcome.outcome === "IMPORTED") expect(outcome.outreach).toEqual({ status: "DRY_RUN", eventId: "evt-1", deduplicated: false });
     expect(sendAcquisitionOutreachMock).toHaveBeenCalledTimes(1);
     expect(sendAcquisitionOutreachMock).toHaveBeenCalledWith(
-      expect.objectContaining({ contractorAgent: "DRIVER_CONTRACTOR", prospectType: "DRIVER", prospectRef: "candidate-1", channel: "WHATSAPP", to: "996700123456" }),
+      expect.objectContaining({ contractorAgent: "DRIVER_CONTRACTOR", prospectType: "DRIVER", prospectRef: "candidate-1", channel: "WHATSAPP", to: "996700123456", contactFingerprint: "phone:996700123456" }),
     );
+    expect(createProspectHandoffMock).toHaveBeenCalledWith(
+      CTX,
+      expect.objectContaining({ prospectType: "DRIVER_SUPPLY", prospectRef: "candidate-1", sourceAgent: "DRIVER_CONTRACTOR", targetAgentOrDepartment: "RT_OFFICE", contactFingerprint: "phone:996700123456" }),
+    );
+  });
+
+  it("never creates a ProspectHandoff when outreach never fires (no real shortage)", async () => {
+    classifyMarketRoleMock.mockResolvedValue(driverClassification());
+    computeMarketGapMock.mockResolvedValue({ demandSeats: 5, supplySeats: 6, gapSeats: 1, priority: "BALANCED", windowDays: 14, corridorId: null, asOf: "x" });
+
+    await processDriverMarketSighting(CTX, { sourceType: "TELEGRAM_GROUP", sourceText: "text", rawPhone: "0700123456" });
+
+    expect(createProspectHandoffMock).not.toHaveBeenCalled();
   });
 });

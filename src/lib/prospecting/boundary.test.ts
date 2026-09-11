@@ -3,14 +3,17 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 // prospecting is a shared vocabulary/contract layer (ProspectType,
-// ProspectHandoff, reserved event names) on top of the existing
-// src/lib/acquisition/ safety-gate infrastructure — it must never gain a
-// database dependency, never re-implement the outreach safety gate, and
-// never reach into an operational CRM's write surface. Same static
-// source-text scan pattern as cargo-profile/boundary.test.ts.
+// ProspectHandoff, reserved event names) plus its own additive persistence
+// (ProspectHandoff — handoff.ts) on top of the existing src/lib/acquisition/
+// safety-gate infrastructure. It owns the `db.prospectHandoff.*` table only:
+// it must never re-implement the outreach safety gate (sendAcquisitionOutreach
+// / recordOptOut / writeOutreachEvent stay outreach-log.ts's exclusive job —
+// handoff.ts may only *read* isDoNotContact, per spec s.4), and it must never
+// reach into another domain's write surface (Partner/Driver/Passenger/
+// TripRequest/Shipment/ScoutCandidate, or another CRM's orchestration).
+// Same static source-text scan pattern as cargo-profile/boundary.test.ts.
 const FORBIDDEN_IMPORTS: Record<string, string[]> = {
-  "@/lib/db": ["db", "prisma"],
-  "@/lib/acquisition/outreach-log": ["sendAcquisitionOutreach", "recordOptOut", "writeOutreachEvent", "isDoNotContact"],
+  "@/lib/acquisition/outreach-log": ["sendAcquisitionOutreach", "recordOptOut", "writeOutreachEvent"],
   "@/lib/sapar/executors": ["assignExecutor", "recordExecutorResponse"],
   "@/lib/delivery-contractor/orchestrator": [
     "processBusinessMarketSighting",
@@ -21,7 +24,16 @@ const FORBIDDEN_IMPORTS: Record<string, string[]> = {
   ],
 };
 
-const FORBIDDEN_CALL_SUBSTRINGS = ["db.partner.create", "db.acquisitionOutreachEvent.create", "prisma."];
+const FORBIDDEN_CALL_SUBSTRINGS = [
+  "db.partner.create",
+  "db.driver.create",
+  "db.passenger.create",
+  "db.tripRequest.create",
+  "db.shipment.create",
+  "db.scoutCandidate.create",
+  "db.acquisitionOutreachEvent.create",
+  "prisma.",
+];
 
 const PROSPECTING_DIR = join(__dirname);
 
