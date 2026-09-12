@@ -21,6 +21,7 @@
     "db:studio": "prisma studio",
     "docs:governance": "tsx scripts/generate-governance-docs.ts",
     "governance:check": "tsx scripts/check-governance.ts",
+    "trace:order": "tsx scripts/trace-order.ts",
     "test": "vitest run",
     "test:integration": "npm run db:guard && vitest run --config vitest.integration.config.ts"
   },

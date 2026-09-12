@@ -50,3 +50,5 @@ next-env.d.ts
 
 # local agent tooling (skills lockfile, not part of the app)
 skills-lock.json
+.agents/
+.claude/
