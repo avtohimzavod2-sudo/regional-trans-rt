@@ -135,3 +135,5 @@ Total manual gates: 10.
 
 To change a verdict, change the organization — staff the owner, name the human, run the drill — and regenerate this file. Editing the markdown alone changes nothing.
 
+Each blocker is classified by kind in RT_PRE_LIVE_BLOCKERS.md — the four kinds are resolved by different people.
+

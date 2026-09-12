@@ -9,11 +9,22 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { renderAccountabilityMatrixDoc, renderPreLiveReadinessDoc } from "@/lib/governance/render-docs";
+import {
+  renderAccountabilityMatrixDoc,
+  renderPreLiveBlockersDoc,
+  renderPreLiveReadinessDoc,
+} from "@/lib/governance/render-docs";
 
 const docsDir = join(process.cwd(), "docs");
 
-writeFileSync(join(docsDir, "RT_ACCOUNTABILITY_MATRIX.md"), renderAccountabilityMatrixDoc(), "utf8");
-writeFileSync(join(docsDir, "RT_PRE_LIVE_READINESS.md"), renderPreLiveReadinessDoc(), "utf8");
+const generated: Array<[string, string]> = [
+  ["RT_ACCOUNTABILITY_MATRIX.md", renderAccountabilityMatrixDoc()],
+  ["RT_PRE_LIVE_READINESS.md", renderPreLiveReadinessDoc()],
+  ["RT_PRE_LIVE_BLOCKERS.md", renderPreLiveBlockersDoc()],
+];
 
-console.log("Regenerated docs/RT_ACCOUNTABILITY_MATRIX.md and docs/RT_PRE_LIVE_READINESS.md");
+for (const [name, contents] of generated) {
+  writeFileSync(join(docsDir, name), contents, "utf8");
+}
+
+console.log(`Regenerated ${generated.map(([name]) => `docs/${name}`).join(", ")}`);

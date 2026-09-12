@@ -3,6 +3,13 @@
 // Kept in src/ rather than scripts/ so a test can assert that the checked-in
 // docs match what the code says. A governance doc that disagrees with the
 // enforced model is worse than no doc.
+import {
+  RT_PRE_LIVE_BLOCKERS,
+  blockersOfKind,
+  classifySubject,
+  type BlockerKind,
+  type PostSpecification,
+} from "./blockers";
 import { RT_ACCOUNTABILITY_MATRIX, type RtCapability } from "./capabilities";
 import { RT_ORG_NODES, type RtOrgNode } from "./org";
 import { evaluateReadiness, MANUAL_PRE_LIVE_GATES } from "./readiness";
@@ -205,6 +212,147 @@ export function renderPreLiveReadinessDoc(): string {
   lines.push("");
   lines.push(
     "To change a verdict, change the organization — staff the owner, name the human, run the drill — and regenerate this file. Editing the markdown alone changes nothing.",
+  );
+  lines.push("");
+  lines.push("Each blocker is classified by kind in RT_PRE_LIVE_BLOCKERS.md — the four kinds are resolved by different people.");
+  lines.push("");
+
+  return lines.join("\n") + "\n";
+}
+
+const KIND_HEADINGS: Record<BlockerKind, { title: string; intro: string }> = {
+  SOFTWARE_BLOCKER: {
+    title: "Software blockers",
+    intro: "RT can close these itself. No permission, no appointment, no third party — just work not yet done.",
+  },
+  HUMAN_STAFFING_BLOCKER: {
+    title: "Human staffing blockers — vacant posts",
+    intro:
+      "These are **not** missing code, and writing code will not close them. Each is a post that nobody holds. Each is specified below — mandate, rights, what the post must never be given, onboarding, credentials, who may appoint — and each specification deliberately describes a seat rather than a person. No individual is named or invented here; appointing someone happens outside this repository.",
+  },
+  EXTERNAL_PROVIDER_BLOCKER: {
+    title: "External provider blockers",
+    intro:
+      "These depend on a third party RT does not control: a bank, a messaging platform, a registry. RT can prepare the integration; it cannot grant itself the relationship.",
+  },
+  FOUNDER_DECISION_BLOCKER: {
+    title: "Founder decision blockers",
+    intro:
+      "Money, law and identity. Each is paired with the engineering work it gates, so that a pending decision never becomes a reason to stop building — the buildable half is listed as a software blocker.",
+  },
+};
+
+function renderPost(post: PostSpecification, lines: string[]): void {
+  const node = RT_ORG_NODES.find((n) => n.id === post.post);
+
+  lines.push(`**Post:** \`${post.post}\` — ${node?.displayName ?? post.post} *(vacant)*`);
+  lines.push("");
+  lines.push(`**Mandate.** ${post.mandate}`);
+  lines.push("");
+  lines.push(`**Appointed by:** ${post.appointedBy}`);
+  lines.push("");
+
+  const section = (heading: string, items: string[]) => {
+    if (items.length === 0) return;
+    lines.push(`*${heading}*`);
+    lines.push("");
+    for (const item of items) lines.push(`- ${item}`);
+    lines.push("");
+  };
+
+  section("Rights — least privilege", post.rights);
+  section("Must never be granted — segregation of duties, as prohibitions", post.deniedRights);
+  section("The same individual must not also hold", post.incompatibleWith);
+  section("Onboarding checklist — complete before the post counts as filled", post.onboarding);
+  section("Credentials", post.credentials);
+
+  if (post.gatesHeldOpen.length > 0) {
+    lines.push("*Gates that stay UNKNOWN until this post is filled*");
+    lines.push("");
+    for (const gate of post.gatesHeldOpen) lines.push(`- \`${gate}\` — blocks LIVE while UNKNOWN.`);
+    lines.push("");
+  }
+}
+
+export function renderPreLiveBlockersDoc(): string {
+  const lines: string[] = [];
+  const report = evaluateReadiness();
+
+  lines.push("# RT Pre-LIVE Blockers");
+  lines.push("");
+  lines.push(GENERATED_NOTE);
+  lines.push("");
+  lines.push(
+    "RT_PRE_LIVE_READINESS.md says RT is not ready. This file says **what kind of thing is missing**, because the four kinds are resolved by completely different people, and confusing them is how a project lies to itself about its own progress.",
+  );
+  lines.push("");
+  lines.push("| Kind | Count | Closed by |");
+  lines.push("| --- | --- | --- |");
+  lines.push(`| SOFTWARE_BLOCKER | ${blockersOfKind("SOFTWARE_BLOCKER").length} | engineering |`);
+  lines.push(
+    `| HUMAN_STAFFING_BLOCKER | ${blockersOfKind("HUMAN_STAFFING_BLOCKER").length} | appointing a person to a vacant post |`,
+  );
+  lines.push(
+    `| EXTERNAL_PROVIDER_BLOCKER | ${blockersOfKind("EXTERNAL_PROVIDER_BLOCKER").length} | a third party RT does not control |`,
+  );
+  lines.push(`| FOUNDER_DECISION_BLOCKER | ${blockersOfKind("FOUNDER_DECISION_BLOCKER").length} | the Founder, and only the Founder |`);
+  lines.push("");
+  lines.push(
+    "> **A vacant post is not missing code.** If \"nobody is accountable for fraud\" were filed as a software gap, someone would eventually close it by writing a module, and RT would go live with an unaccountable one. So the human blockers below carry a post specification instead of a ticket.",
+  );
+  lines.push("");
+  lines.push(
+    `Blocked pre-LIVE capabilities: **${report.capabilities.filter((c) => c.status !== "READY").length}** · Manual gates still UNKNOWN: **${report.manualGates.filter((g) => g.status === "UNKNOWN").length}** · Classified blockers: **${RT_PRE_LIVE_BLOCKERS.length}**`,
+  );
+  lines.push("");
+  lines.push(
+    "Completeness is enforced: `blockers.test.ts` fails if any blocked capability or unattested gate has no entry here, and fails if a purely human vacancy is ever also filed as software.",
+  );
+  lines.push("");
+
+  for (const kind of [
+    "HUMAN_STAFFING_BLOCKER",
+    "SOFTWARE_BLOCKER",
+    "EXTERNAL_PROVIDER_BLOCKER",
+    "FOUNDER_DECISION_BLOCKER",
+  ] as const) {
+    const blockers = blockersOfKind(kind);
+    lines.push(`## ${KIND_HEADINGS[kind].title}`);
+    lines.push("");
+    lines.push(KIND_HEADINGS[kind].intro);
+    lines.push("");
+
+    for (const blocker of blockers) {
+      lines.push(`### ${blocker.title}`);
+      lines.push("");
+      lines.push(`\`${blocker.id}\``);
+      lines.push("");
+      lines.push(`**Situation.** ${blocker.detail}`);
+      lines.push("");
+      lines.push(`**Clears when.** ${blocker.resolution}`);
+      lines.push("");
+
+      const caps = blocker.blocks.filter((s) => classifySubject(s) === "CAPABILITY");
+      const gates = blocker.blocks.filter((s) => classifySubject(s) === "MANUAL_GATE");
+      if (caps.length > 0) {
+        lines.push(
+          `**Holds shut.** ${caps.map((c) => `\`${c}\`${RT_ACCOUNTABILITY_MATRIX.find((m) => m.capability === c)?.preLiveRequired ? " *(pre-LIVE)*" : ""}`).join(", ")}`,
+        );
+        lines.push("");
+      }
+      if (gates.length > 0) {
+        lines.push(`**Gates held UNKNOWN.** ${gates.map((g) => `\`${g}\``).join(", ")}`);
+        lines.push("");
+      }
+
+      if (blocker.post) renderPost(blocker.post, lines);
+    }
+  }
+
+  lines.push("## What this document is not");
+  lines.push("");
+  lines.push(
+    "It is not a plan with dates, and it is not progress. A complete, tidy blocker list reads like readiness and is not readiness: every item below is still open. The verdict lives in RT_PRE_LIVE_READINESS.md and it is **NOT_READY**.",
   );
   lines.push("");
 

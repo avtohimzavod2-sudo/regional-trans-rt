@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { renderAccountabilityMatrixDoc, renderPreLiveReadinessDoc } from "./render-docs";
+import { renderAccountabilityMatrixDoc, renderPreLiveBlockersDoc, renderPreLiveReadinessDoc } from "./render-docs";
 
 function readDoc(name: string): string {
   return readFileSync(join(process.cwd(), "docs", name), "utf8").replace(/\r\n/g, "\n");
@@ -18,6 +18,19 @@ describe("generated governance docs", () => {
 
   it("keeps RT_PRE_LIVE_READINESS.md in sync with the code", () => {
     expect(readDoc("RT_PRE_LIVE_READINESS.md")).toBe(renderPreLiveReadinessDoc());
+  });
+
+  it("keeps RT_PRE_LIVE_BLOCKERS.md in sync with the code", () => {
+    expect(readDoc("RT_PRE_LIVE_BLOCKERS.md")).toBe(renderPreLiveBlockersDoc());
+  });
+
+  it("states in the blockers doc that a vacancy is not missing code", () => {
+    const doc = renderPreLiveBlockersDoc();
+
+    expect(doc).toContain("A vacant post is not missing code.");
+    // The vacant posts must be visibly vacant, and no person may be named.
+    expect(doc).toContain("*(vacant)*");
+    expect(doc).toContain("it is not progress");
   });
 
   it("never publishes a LIVE READY verdict off the back of passing tests", () => {
