@@ -56,6 +56,18 @@ jobs:
       - name: Generate Prisma client
         run: npx prisma generate
 
+      # Next 16 generates next-env.d.ts and the route-type globals (LayoutProps,
+      # PageProps, RouteContext) into .next/types, and both are gitignored
+      # because Next regenerates them. A fresh checkout therefore has neither,
+      # which is why the first CI run failed on src/app/layout.tsx with
+      # "Cannot find name 'LayoutProps'" while passing on developer machines
+      # that had already run `next dev`. `next typegen` produces exactly those
+      # types without a full build -- the ordering the Next CLI docs prescribe
+      # for CI type-checking (node_modules/next/dist/docs/01-app/03-api-reference
+      # /06-cli/next.md, "next typegen options").
+      - name: Generate route types
+        run: npx next typegen
+
       - name: Typecheck
         run: npx tsc --noEmit
 
