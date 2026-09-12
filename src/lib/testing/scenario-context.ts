@@ -18,10 +18,17 @@
 // ends — storage.run() restores the outer (undefined) context automatically
 // once the callback settles, including on throw.
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { RecordingOutboundSink } from "./outbound-sink";
 
 export interface ScenarioContext {
   testRunId: string;
   scenarioId: string;
+  /** Optional explicit dry-run provider. Absent by default, which keeps the
+   * original behaviour — every send inside the scenario is refused outright.
+   * Present, it lets a synthetic recipient's message be recorded instead of
+   * aborting the flow, so an end-to-end run can proceed past the first
+   * notification. See outbound-sink.ts for why that stays honest. */
+  outboundSink?: RecordingOutboundSink;
 }
 
 const storage = new AsyncLocalStorage<ScenarioContext>();

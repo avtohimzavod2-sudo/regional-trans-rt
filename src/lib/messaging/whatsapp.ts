@@ -1,6 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { isScenarioContext, ScenarioSuppressedSendError } from "@/lib/testing/scenario-context";
-import { assertRealRecipient } from "@/lib/testing/synthetic";
+import { screenOutboundSend } from "./send-gate";
 
 const GRAPH_VERSION = "v21.0";
 
@@ -17,16 +16,13 @@ function authHeaders() {
 }
 
 export async function sendWhatsAppText(to: string, body: string) {
-  // Throws rather than returning a benign no-op: acquisition/adapters.ts's
-  // whatsappOutreachAdapter.send() unconditionally reports delivered:true
-  // and never inspects this function's return value, so a silent suppressed
-  // return here would get reported upstream as a fabricated SENT outcome.
-  // Throwing is caught by sendAcquisitionOutreach's existing try/catch and
-  // honestly recorded as FAILED instead.
-  if (isScenarioContext()) throw new ScenarioSuppressedSendError("WhatsApp");
-  // Second, independent net: a synthetic passenger persisted by an earlier
-  // scenario can be picked up later by a job running outside one.
-  assertRealRecipient("WhatsApp", to);
+  // The gate throws rather than returning a benign no-op when it refuses:
+  // acquisition/adapters.ts's whatsappOutreachAdapter.send() unconditionally
+  // reports delivered:true and never inspects this function's return value, so
+  // a silent suppressed return would be reported upstream as a fabricated SENT
+  // outcome. Throwing is caught by sendAcquisitionOutreach's existing try/catch
+  // and honestly recorded as FAILED instead.
+  if (screenOutboundSend("WhatsApp", to, body) === "RECORDED_DRY_RUN") return { dryRun: true } as const;
   const res = await fetch(apiUrl("messages"), {
     method: "POST",
     headers: authHeaders(),
@@ -44,8 +40,9 @@ export async function sendWhatsAppText(to: string, body: string) {
 }
 
 export async function sendWhatsAppConfirmButtons(to: string, body: string, matchId: string) {
-  if (isScenarioContext()) throw new ScenarioSuppressedSendError("WhatsApp");
-  assertRealRecipient("WhatsApp", to);
+  // matchId is handed to the gate so a dry-run scenario can answer the prompt
+  // for the right match instead of inferring which one is open.
+  if (screenOutboundSend("WhatsApp", to, body, matchId) === "RECORDED_DRY_RUN") return { dryRun: true } as const;
   const res = await fetch(apiUrl("messages"), {
     method: "POST",
     headers: authHeaders(),

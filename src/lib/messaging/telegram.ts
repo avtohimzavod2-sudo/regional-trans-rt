@@ -1,6 +1,6 @@
 import { Bot, InlineKeyboard } from "grammy";
-import { isScenarioContext, ScenarioSuppressedSendError } from "@/lib/testing/scenario-context";
-import { assertRealRecipient } from "@/lib/testing/synthetic";
+import { isScenarioContext } from "@/lib/testing/scenario-context";
+import { isDryRunRecipient, screenOutboundSend } from "./send-gate";
 
 let botInstance: Bot | null = null;
 
@@ -21,25 +21,21 @@ export function confirmDeclineKeyboard(matchId: string, role: "driver" | "passen
 }
 
 export async function sendTelegramMessage(chatId: string, text: string, keyboard?: InlineKeyboard) {
-  if (isScenarioContext()) throw new ScenarioSuppressedSendError("Telegram");
-  // Second, independent net: a synthetic driver persisted by an earlier
-  // scenario can be picked up later by a job running outside one.
-  assertRealRecipient("Telegram", chatId);
+  if (screenOutboundSend("Telegram", chatId, text) === "RECORDED_DRY_RUN") return { dryRun: true } as const;
   const bot = getTelegramBot();
   return bot.api.sendMessage(chatId, text, keyboard ? { reply_markup: keyboard } : undefined);
 }
 
 export async function sendTelegramDirectMessage(userId: string, text: string): Promise<boolean> {
-  // Suppressed like a blocked chat (false), not a thrown error: unlike
-  // sendTelegramMessage, callers of this function already treat "false" as
-  // the honest not-delivered outcome, so no exception is needed here.
-  if (isScenarioContext()) return false;
-  // Throws rather than returning false, unlike the scenario case above. A
-  // suppressed scenario send is an expected outcome; a synthetic recipient
-  // reaching the real Telegram API outside a scenario is a bug, and swallowing
-  // it as "not delivered" would leave it undiscovered until it stopped being
-  // one.
-  assertRealRecipient("Telegram", userId);
+  // The one send that keeps its own pre-check rather than delegating outright.
+  // A scenario with no dry-run sink is suppressed like a blocked chat (false)
+  // instead of throwing, because callers of this function already treat false
+  // as the honest not-delivered outcome — whereas screenOutboundSend throws,
+  // which is right for the other three. Everything past this line is the
+  // shared policy: recorded if synthetic and a sink is registered, refused if
+  // synthetic outside a scenario.
+  if (isScenarioContext() && !isDryRunRecipient(userId)) return false;
+  if (screenOutboundSend("Telegram", userId, text) === "RECORDED_DRY_RUN") return true;
   try {
     await getTelegramBot().api.sendMessage(userId, text);
     return true;
