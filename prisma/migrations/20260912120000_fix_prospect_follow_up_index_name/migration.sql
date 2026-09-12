@@ -1,0 +1,25 @@
+-- Schema-consistency fix found by running the migration history against a real
+-- Postgres for the first time (the previous contour had been created with
+-- `prisma db push`, which never executes these files, so nothing had ever
+-- checked them).
+--
+-- `prisma migrate diff --from-schema-datamodel --to-schema-datasource` reported
+-- persistent drift: the datamodel derives the index name
+--
+--   ProspectFollowUpAttempt_prospectType_prospectRef_attemptNum_idx   (63 chars)
+--
+-- but 20260911150000_add_prospect_lifecycle_and_follow_up created it one
+-- character shorter, "...attemptNu_idx" (62). 63 is exactly Postgres's
+-- identifier limit, so the name is legal and the truncation was simply wrong by
+-- one — which is why it went unnoticed: the index works, only its name differs,
+-- and a name only matters when a tool compares it. Left alone, every future
+-- `migrate dev` would keep offering to fix this and every drift check would
+-- keep failing, which is how drift checks get ignored.
+--
+-- Non-destructive: renames an index, touches no data, drops nothing. IF EXISTS
+-- so that a database already carrying the correct name applies this as a no-op
+-- rather than erroring.
+--
+-- Rollback: ALTER INDEX ... RENAME TO the 62-character name.
+ALTER INDEX IF EXISTS "ProspectFollowUpAttempt_prospectType_prospectRef_attemptNu_idx"
+  RENAME TO "ProspectFollowUpAttempt_prospectType_prospectRef_attemptNum_idx";

@@ -1,0 +1,41 @@
+# Local development / integration-test database contour.
+#
+# This is the only database RT's tooling is allowed to drop and rebuild
+# (src/lib/db-contour.ts refuses anything that is not loopback). It holds no
+# real customer, driver or financial data and is expected to be thrown away.
+#
+# Port 55432, not 5432: developers commonly already have a Postgres on 5432,
+# and "I migrated the wrong database" is the failure this whole contour exists
+# to prevent. A non-default port makes the intended target explicit in the URL.
+#
+#   docker compose up -d          start it
+#   npm run db:setup              guard, apply migrations, seed
+#   docker compose down           stop it (data survives in the named volume)
+#   docker compose down -v        stop it and delete the data
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: rt-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: regional_trans_rt
+    ports:
+      - "55432:5432"
+    volumes:
+      - rt-postgres-data:/var/lib/postgresql/data
+      # Creates the separate integration-test database on first boot. Kept apart
+      # from the dev database so that a test run which resets its schema cannot
+      # wipe the data a developer was in the middle of looking at.
+      - ./prisma/docker/init-test-database.sql:/docker-entrypoint-initdb.d/10-init-test-database.sql:ro
+    healthcheck:
+      # `npm run db:*` immediately after `compose up` otherwise races the
+      # server's first start, which looks like an intermittent connection bug.
+      test: ["CMD-SHELL", "pg_isready -U postgres -d regional_trans_rt"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  rt-postgres-data:

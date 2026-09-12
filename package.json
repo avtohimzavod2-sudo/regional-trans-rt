@@ -8,15 +8,21 @@
     "start": "next start",
     "lint": "eslint",
     "db:generate": "prisma generate",
-    "db:push": "prisma db push",
-    "db:migrate": "prisma migrate dev",
+    "db:guard": "tsx scripts/assert-dev-database.ts",
+    "db:push": "npm run db:guard && prisma db push",
+    "db:migrate": "npm run db:guard && prisma migrate dev",
+    "db:deploy": "npm run db:guard && prisma migrate deploy",
+    "db:reset": "npm run db:guard && prisma migrate reset --force",
+    "db:status": "prisma migrate status",
+    "db:setup": "npm run db:guard && prisma migrate deploy && npm run db:seed",
     "db:seed": "tsx prisma/seed.ts",
     "db:seed:acquisition-demo": "tsx prisma/seed-acquisition-fixtures.ts",
     "db:clear:acquisition-demo": "tsx prisma/seed-acquisition-fixtures.ts --clear",
     "db:studio": "prisma studio",
     "docs:governance": "tsx scripts/generate-governance-docs.ts",
     "governance:check": "tsx scripts/check-governance.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:integration": "npm run db:guard && vitest run --config vitest.integration.config.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

@@ -42,6 +42,11 @@ next-env.d.ts
 
 .vercel
 .env*
+# ...except the template. It holds no secrets (every value is empty or a local
+# placeholder) and it is the only place the database-contour rules, the
+# .env/.env.local precedence trap and the mock-by-default providers are written
+# down for a new checkout.
+!.env.example
 
 # local agent tooling (skills lockfile, not part of the app)
 skills-lock.json

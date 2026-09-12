@@ -1,10 +1,23 @@
 # Regional Trans CI.
 #
-# Deliberately one job and no deployment. RT's constraints forbid production
-# env changes, live enablement and auto-migrations, so this workflow never
-# connects to a database, never runs `prisma migrate`, never seeds, and needs
-# no real provider credentials. Every step that can fail does fail the run --
+# No deployment, ever. RT's constraints forbid production env changes, live
+# enablement and auto-migrations. Every step that can fail does fail the run --
 # there is no `continue-on-error` anywhere, on purpose.
+#
+# Two jobs, and the split is the point:
+#
+#   verify       no database at all. Proves the unit suite, typecheck, lint and
+#                build stand up on a bare clone.
+#   integration  a throwaway Postgres service container, created empty for this
+#                job and destroyed with it. Proves the committed migration
+#                history applies from zero and that the constraints RT relies on
+#                (idempotency keys) exist in a real database rather than in a
+#                mock's expectations.
+#
+# Neither job can reach a real database. The service container is published on
+# the runner's loopback interface, and src/lib/db-contour.ts refuses anything
+# that is not loopback -- so a DATABASE_URL secret accidentally added to this
+# repo would not silently become the integration target, it would fail the job.
 name: CI
 
 on:
@@ -89,7 +102,78 @@ jobs:
       - name: Governance docs are in sync
         run: |
           npm run docs:governance
-          git diff --exit-code -- docs/RT_ACCOUNTABILITY_MATRIX.md docs/RT_PRE_LIVE_READINESS.md
+          git diff --exit-code -- docs/
 
       - name: Build
         run: npm run build
+
+  # Real Postgres, real migrations, real Prisma client. Kept out of `verify` so
+  # that job stays runnable with no database -- see vitest.integration.config.ts
+  # for why the two suites are not merged.
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: rt_integration
+        ports:
+          - 5432:5432
+        # Without this the first migrate races the server's first start, which
+        # presents as an intermittent connection failure rather than as a race.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      # Both point at the same throwaway container. DATABASE_URL is what the
+      # Prisma CLI reads; INTEGRATION_DATABASE_URL is what the suite resolves,
+      # set explicitly because the derived `_test` name would be a database the
+      # service container never created.
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/rt_integration
+      INTEGRATION_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/rt_integration
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      # Belt and braces: the suite performs this check itself before collecting
+      # a single file, but a failure here is far easier to read than one buried
+      # in a Vitest startup error.
+      - name: Database contour guard
+        run: npm run db:guard
+
+      # Bootstrap from zero on an empty container -- the clean-bootstrap proof.
+      # `migrate deploy`, never `db push`: pushing the datamodel would verify a
+      # schema RT does not deploy.
+      - name: Apply migrations from zero
+        run: npx prisma migrate deploy
+
+      - name: Migration history is fully applied
+        run: npx prisma migrate status
+
+      # The datamodel and the database built from the migrations must describe
+      # the same schema. This is what caught the mistruncated index name.
+      - name: No schema drift between datamodel and migrations
+        run: >-
+          npx prisma migrate diff
+          --from-schema-datamodel prisma/schema.prisma
+          --to-schema-datasource prisma/schema.prisma
+          --exit-code
+
+      - name: Integration tests
+        run: npx vitest run --config vitest.integration.config.ts
