@@ -85,6 +85,34 @@ describe("assertSyntheticContour", () => {
   });
 
   it("refuses when there is no database configured at all", () => {
-    expect(() => assertSyntheticContour(undefined)).toThrow(/DATABASE_URL is not set/);
+    // Has to go through process.env, not through `assertSyntheticContour(undefined)`:
+    // an explicit undefined argument selects the default parameter, so that
+    // call reads DATABASE_URL and passes wherever one happens to be set. It
+    // did pass locally on a shell with no DATABASE_URL, and failed on CI,
+    // where the placeholder loopback URL is a perfectly valid contour.
+    const original = process.env.DATABASE_URL;
+    delete process.env.DATABASE_URL;
+    try {
+      expect(() => assertSyntheticContour()).toThrow(/DATABASE_URL is not set/);
+    } finally {
+      if (original === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = original;
+    }
+  });
+
+  it("reads DATABASE_URL when called with no argument", () => {
+    // The pairing that makes the test above meaningful: the default parameter
+    // really is the process environment, so the deletion is what the refusal
+    // is responding to.
+    const original = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = "postgresql://u:p@ep-x.neon.tech/neondb";
+    try {
+      expect(() => assertSyntheticContour()).toThrow(SyntheticContourError);
+      process.env.DATABASE_URL = "postgresql://u:p@127.0.0.1:5432/rt_test";
+      expect(() => assertSyntheticContour()).not.toThrow();
+    } finally {
+      if (original === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = original;
+    }
   });
 });
