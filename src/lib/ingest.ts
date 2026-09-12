@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { logAction } from "@/lib/audit";
-import { extractTripMessage, type StopContext } from "@/lib/nlp/extract";
+import { extractTripMessage, type ExtractionResult, type StopContext } from "@/lib/nlp/extract";
 import { messages, detectLangFallback, type Lang } from "@/lib/i18n/messages";
 import { sendTelegramDirectMessage, sendTelegramMessage } from "@/lib/messaging/telegram";
 import { sendWhatsAppText } from "@/lib/messaging/whatsapp";
@@ -63,6 +63,56 @@ async function findOrCreateDriver(telegramUserId: string, telegramUsername: stri
   });
 }
 
+// The inbound message a request or offer came from, stored as the row that
+// TripRequest.rawMessageId / DriverOffer.rawMessageId actually point at.
+//
+// Both webhook routes hand ingest the *provider's* message id (a WhatsApp
+// `wamid.…`, a Telegram `message_id`) and both columns carry a real foreign key
+// to RawMessage, so until this existed every private-channel inbound with a
+// message id died on `DriverOffer_rawMessageId_fkey`. The unit suite mocks
+// @/lib/db, so nothing caught it; the first end-to-end run against a real
+// Postgres did, immediately.
+//
+// The id namespaces the provider's id by channel and chat because a provider id
+// is not globally unique — Telegram's message_id is a small per-chat integer,
+// so a bare "42" would collide across chats and the unique constraint on
+// rawMessageId would then silently swallow an unrelated passenger's order as a
+// redelivery. Redelivery of the *same* message still lands on the same row,
+// which is what makes the P2002 dedupe below work.
+function inboundMessageKey(channel: "WHATSAPP" | "TELEGRAM_BOT", chatId: string, providerMessageId: string): string {
+  return `${channel}:${chatId}:${providerMessageId}`;
+}
+
+async function recordInboundMessage(params: {
+  channel: "WHATSAPP" | "TELEGRAM_BOT";
+  chatId: string;
+  senderId: string;
+  text: string;
+  lang: Lang;
+  result: ExtractionResult;
+  providerMessageId: string;
+}): Promise<string> {
+  const id = inboundMessageKey(params.channel, params.chatId, params.providerMessageId);
+  await db.rawMessage.upsert({
+    where: { id },
+    // A retry must not rewrite what RT originally received: the value of this
+    // row is that it says what arrived the first time.
+    update: {},
+    create: {
+      id,
+      channel: params.channel,
+      chatId: params.chatId,
+      senderId: params.senderId,
+      text: params.text,
+      detectedLanguage: params.lang,
+      parseResult: params.result.kind,
+      extractionConfidence: params.result.confidence,
+      extractionRaw: params.result,
+    },
+  });
+  return id;
+}
+
 async function resolveStopIdByKey(compositeKey: string): Promise<string | null> {
   const separatorIndex = compositeKey.indexOf(":");
   if (separatorIndex === -1) return null;
@@ -82,6 +132,19 @@ export async function ingestPassengerMessage(whatsappId: string, text: string, r
     today: new Date(),
   });
   const lang = (result.language ?? detectLangFallback(text)) as Lang;
+  // Recorded before the early returns: an inbound RT could not parse is
+  // precisely the one worth having on disk.
+  const inboundId = rawMessageId
+    ? await recordInboundMessage({
+        channel: "WHATSAPP",
+        chatId: whatsappId,
+        senderId: whatsappId,
+        text,
+        lang,
+        result,
+        providerMessageId: rawMessageId,
+      })
+    : undefined;
   const passenger = await findOrCreatePassenger(whatsappId, lang);
 
   if (
@@ -123,7 +186,7 @@ export async function ingestPassengerMessage(whatsappId: string, text: string, r
         luggage: result.luggage,
         pickupPoint: result.pickupPoint,
         sourceChannel: "WHATSAPP",
-        rawMessageId,
+        rawMessageId: inboundId,
       },
       include: { origin: true, destination: true },
     });
@@ -132,9 +195,9 @@ export async function ingestPassengerMessage(whatsappId: string, text: string, r
     // message (same rawMessageId) must never create a second TripRequest.
     // TripRequest.rawMessageId carries a real DB-level unique constraint, so
     // this is safe under concurrent redelivery (not a check-then-write race).
-    if (rawMessageId && err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+    if (inboundId && err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
       request = await db.tripRequest.findUniqueOrThrow({
-        where: { rawMessageId },
+        where: { rawMessageId: inboundId },
         include: { origin: true, destination: true },
       });
       isDuplicate = true;
@@ -157,7 +220,7 @@ export async function ingestPassengerMessage(whatsappId: string, text: string, r
       action: "request.duplicate_ignored",
       entityType: "TripRequest",
       entityId: request.id,
-      details: { rawMessageId },
+      details: { rawMessageId: inboundId, providerMessageId: rawMessageId },
     });
     return request;
   }
@@ -238,6 +301,17 @@ export async function ingestDriverPrivateMessage(
     today: new Date(),
   });
   const lang = (result.language ?? detectLangFallback(text)) as Lang;
+  const inboundId = rawMessageId
+    ? await recordInboundMessage({
+        channel: "TELEGRAM_BOT",
+        chatId: telegramUserId,
+        senderId: telegramUserId,
+        text,
+        lang,
+        result,
+        providerMessageId: rawMessageId,
+      })
+    : undefined;
   const driver = await findOrCreateDriver(telegramUserId, telegramUsername, lang);
 
   if (result.kind !== "DRIVER_OFFER" || !origin || !destination || !result.travelDate || !result.seats) {
@@ -276,7 +350,7 @@ export async function ingestDriverPrivateMessage(
         seatsTotal: result.seats,
         seatsAvailable: result.seats,
         sourceChannel: "TELEGRAM_BOT",
-        rawMessageId,
+        rawMessageId: inboundId,
       },
       include: { origin: true, destination: true },
     });
@@ -285,9 +359,9 @@ export async function ingestDriverPrivateMessage(
     // inbound message (same rawMessageId) must never create a second
     // DriverOffer. DriverOffer.rawMessageId carries a real DB-level unique
     // constraint, so this is safe under concurrent redelivery.
-    if (rawMessageId && err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+    if (inboundId && err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
       offer = await db.driverOffer.findUniqueOrThrow({
-        where: { rawMessageId },
+        where: { rawMessageId: inboundId },
         include: { origin: true, destination: true },
       });
       isDuplicateOffer = true;
@@ -302,7 +376,7 @@ export async function ingestDriverPrivateMessage(
       action: "offer.duplicate_ignored",
       entityType: "DriverOffer",
       entityId: offer.id,
-      details: { rawMessageId },
+      details: { rawMessageId: inboundId, providerMessageId: rawMessageId },
     });
     return offer;
   }

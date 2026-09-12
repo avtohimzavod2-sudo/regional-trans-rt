@@ -28,7 +28,7 @@ const dbMocks = {
   driver: { upsert: vi.fn(), update: vi.fn() },
   tripRequest: { create: vi.fn(), findUniqueOrThrow: vi.fn() },
   driverOffer: { create: vi.fn(), findUniqueOrThrow: vi.fn() },
-  rawMessage: { create: vi.fn() },
+  rawMessage: { create: vi.fn(), upsert: vi.fn() },
 };
 vi.mock("@/lib/db", () => ({ db: dbMocks }));
 
@@ -334,8 +334,14 @@ describe("ingestPassengerMessage — Test 19: duplicate demand does not create a
 
     const request = await ingestPassengerMessage("+996700000001", "text", "wamid.same-message");
 
+    // The stored key namespaces the provider's message id by channel and chat:
+    // TripRequest.rawMessageId is a foreign key to a RawMessage row ingest now
+    // writes, and a bare provider id is not unique across chats.
+    expect(dbMocks.rawMessage.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: "WHATSAPP:+996700000001:wamid.same-message" } }),
+    );
     expect(dbMocks.tripRequest.findUniqueOrThrow).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { rawMessageId: "wamid.same-message" } }),
+      expect.objectContaining({ where: { rawMessageId: "WHATSAPP:+996700000001:wamid.same-message" } }),
     );
     expect(request).toEqual(expect.objectContaining({ id: "req_existing" }));
     expect(logActionMock).toHaveBeenCalledWith(expect.objectContaining({ action: "request.duplicate_ignored", entityId: "req_existing" }));
@@ -417,8 +423,11 @@ describe("ingestDriverPrivateMessage — Test 19: duplicate offer does not creat
 
     const offer = await ingestDriverPrivateMessage("tg_1", "user1", "text", "tgmsg.same-message");
 
+    expect(dbMocks.rawMessage.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: "TELEGRAM_BOT:tg_1:tgmsg.same-message" } }),
+    );
     expect(dbMocks.driverOffer.findUniqueOrThrow).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { rawMessageId: "tgmsg.same-message" } }),
+      expect.objectContaining({ where: { rawMessageId: "TELEGRAM_BOT:tg_1:tgmsg.same-message" } }),
     );
     expect(offer).toEqual(expect.objectContaining({ id: "offer_existing" }));
     expect(logActionMock).toHaveBeenCalledWith(expect.objectContaining({ action: "offer.duplicate_ignored", entityId: "offer_existing" }));
