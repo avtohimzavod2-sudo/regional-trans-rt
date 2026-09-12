@@ -1,0 +1,83 @@
+# Regional Trans CI.
+#
+# Deliberately one job and no deployment. RT's constraints forbid production
+# env changes, live enablement and auto-migrations, so this workflow never
+# connects to a database, never runs `prisma migrate`, never seeds, and needs
+# no real provider credentials. Every step that can fail does fail the run --
+# there is no `continue-on-error` anywhere, on purpose.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A superseded run tells you nothing useful; keep the newest per ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Read-only. CI verifies, it does not write to the repo or publish anything.
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Prisma needs DATABASE_URL present to parse the datasource block. It is
+      # never dialled: every test mocks @/lib/db, and no step here migrates,
+      # seeds or queries. A placeholder keeps runs reproducible and keeps real
+      # credentials out of CI entirely.
+      DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/rt_ci_never_connects
+      # The app's env reads all throw at call time rather than defaulting to
+      # something permissive (src/lib/auth/session.ts, messaging/*.ts), so the
+      # absence of secrets here is the fail-closed behaviour working, not a gap.
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # ci, not install: the lockfile is the contract.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate Prisma schema
+        run: npx prisma validate
+
+      # Must precede typecheck and tests: @prisma/client is generated, and
+      # nothing that imports it resolves until it exists.
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Tests
+        run: npm test
+
+      # Structural soundness of the org model. Fails on an unowned capability,
+      # a reporting cycle or an agent standing in for a human approver. Prints
+      # the pre-LIVE and LIVE verdicts without gating on them -- see
+      # scripts/check-governance.ts for why that separation matters.
+      - name: Governance and readiness gates
+        run: npm run governance:check
+
+      # The published governance docs are generated. If they drift from the
+      # code they describe, people trust a document that is wrong.
+      - name: Governance docs are in sync
+        run: |
+          npm run docs:governance
+          git diff --exit-code -- docs/RT_ACCOUNTABILITY_MATRIX.md docs/RT_PRE_LIVE_READINESS.md
+
+      - name: Build
+        run: npm run build
