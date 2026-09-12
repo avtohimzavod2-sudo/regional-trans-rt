@@ -137,12 +137,147 @@ can be resolved by engineering.
 
 ---
 
-## D. Verification at time of audit
+## D. Reconciliation — 12 September 2026
+
+The audit above is left as written. This section records what has changed
+since, finding by finding, because an audit edited to match later work stops
+being evidence of anything.
+
+### Findings now closed
+
+**B4 — passenger financial intent idempotency.** Closed by `9075275`. There is
+now a `PassengerFinancialIntent` model with a `@unique idempotencyKey`, and
+`recordPassengerFinancialIntent` relies on the database constraint instead of
+findFirst-then-create: a concurrent double-delivery loses the race at the
+constraint and returns the existing intent rather than writing a second one.
+**The migration is authored but has not been applied to any database** — the
+development database was unreachable during this work, and no production
+mutation was attempted or permitted. `prisma/migrations/20260912100000_add_passenger_financial_intent`
+must be applied before the path is exercised.
+
+**B7 — AKZHOL and ZHOLAMAN unimplemented.** Closed by `5eb65b1`, but not in the
+way the audit assumed. The audit offered two honest options — build the manager
+layer or delete it. The Founder chose a third that the audit did not consider
+and that turns out to be the accurate one: **the management-information layer
+is built; the accountable posts stay vacant.** `src/lib/akzhol/*` and
+`src/lib/zholaman/*` are read-only, role-gated report builders over existing
+events and data, with no Prisma write call anywhere in either (enforced by a
+static boundary test) and no money read in the passenger one at all. Two new
+IMPLEMENTED `READ_ONLY_ANALYTICS` nodes record the code; `AKZHOL` and
+`ZHOLAMAN` remain PLANNED because nobody holds the post. Conflating the
+instrumentation with the post is precisely the management theater the sprint
+was meant to avoid.
+
+**B8 — three commits unpushed, nothing in CI.** Closed. `1bd7b47..3419133` was
+pushed to `origin/main` after verifying no secrets, credentials, `.env` files,
+binaries or local tooling artifacts were included, and `d4e23b4` + `1f3f044`
+added a fail-closed GitHub Actions workflow that runs on pushes to `main` and
+on pull requests: reproducible install, `next typegen`, typecheck, lint, tests,
+build, and the governance and readiness validators. It does not deploy, does
+not migrate, and uses no production secrets. The drift tests that keep the
+generated docs honest now run on every push.
+
+### Findings still open
+
+**B1 — the governance layer is inert at runtime.** Unchanged and still the
+central limitation. The new modules do not change it: `src/lib/governance/` is
+still imported by no request path. The one place the boundary is real at
+runtime is the per-module role gate (akzhol, zholaman, artur, sapargul,
+tyyin), which fails closed. Making a post's full grant enforceable rather than
+asserted is filed as `role_grants_not_enforced_at_runtime`.
+
+**B2 — `preLiveRequired` is one engineer's unreviewed judgment.** Narrowed, not
+closed, by `8353f7e`. Every flag is now traced to a stated rule, so the rules
+can be reviewed once instead of 33 booleans one at a time, and the residue is
+two items: `drive_crm_event_write` (required on judgment alone) and
+`cargo_payment_confirmation` (a money capability a rule says cannot wait, while
+the flag says it can). Those two are in section C below. The rules themselves
+still have had no business or legal review.
+
+**B3 — matrix completeness is unprovable.** Unchanged. `RT_PRE_LIVE_BLOCKERS`
+inherits the same limitation: it is complete with respect to what readiness
+reports, which is complete with respect to what the matrix lists.
+
+**B5 — the chart is part aspiration.** Now 12 of 44 nodes are PLANNED (27%).
+Two IMPLEMENTED nodes were added and no planned node was filled, so the
+proportion improved slightly and nothing about the substance did.
+
+**B6 — the inactive-owner check has never run against a non-empty set.**
+Unchanged.
+
+---
+
+## C-2. FOUNDER_DECISION_REQUIRED, re-adjudicated
+
+Each item from section C re-examined against the rule that a Founder Decision
+must never be a way to stop engineering work. Where the answer follows from
+RT's architecture it was taken as a technical decision and implemented; what
+remains is money, law, identity and appointment.
+
+**1. Passenger cashier identity — still the Founder's, engineering unblocked.**
+The name cannot be derived from anything; inventing one is forbidden. But the
+decision was blocking more than it should: the module can be built against the
+neutral `PASSENGER_CASHIER` id and named later. Split accordingly into
+`founder_names_passenger_cashier` (decision) and `passenger_cashier_not_wired`
+(software, buildable today). The idempotency substrate it will consume already
+exists.
+
+**2. Pricing and tariff policy — still the Founder's.** No engineering choice
+can determine what RT charges, and RT must never invent a price. What follows
+unambiguously from the architecture is already true: an unknown price resolves
+to UNKNOWN / REQUIRES_QUOTE rather than to a guess. Once a policy exists,
+`TARIFF_ENGINE` is deterministic work with no further decisions in it.
+
+**3. Named humans for seven roles — still the Founder's, but the ask is now
+specific.** "Appoint an accountant" was not an actionable request. Each post is
+now specified in `docs/RT_PRE_LIVE_BLOCKERS.md`: mandate, least-privilege
+rights, the rights the post must never receive, incompatible posts,
+onboarding checklist, credentials and their revocation, who may appoint, and
+which manual gate stays UNKNOWN until it is filled. No person is named or
+invented anywhere — a seat is described, and filling it happens outside this
+repository. Eight posts, since the two direction-manager posts joined the list.
+
+**4. Legal entity and regulatory position — still the Founder's**, and it is
+upstream of both external-provider blockers: no payment provider and no
+production messaging account can be obtained without it.
+
+**5. Whether `preLiveRequired` is correctly drawn — reduced to two questions.**
+See B2 above. The engineering half is done; what is left is a business
+judgment on exactly two capabilities, one of which is a possible *under*-
+statement rather than an over-statement.
+
+**6. Whether the manager layer gets built or deleted — decided, and it was a
+technical decision.** RT's architecture answers this without a business choice:
+the events and data Akzhol and Zholaman need already exist, so a read-only
+management-information layer over them costs nothing structurally and removes
+the "named but unbuilt" state the audit called the worst option. Built as
+read/analysis modules with no write access and no money authority. The
+appointment of managers remains a Founder act, now filed as two
+`HUMAN_STAFFING_BLOCKER` posts rather than as an open question.
+
+**Net:** of the six, one is resolved as a technical decision (6), one is
+reduced to a two-item question (5), one is made actionable without being
+resolved (3), and three remain genuinely the Founder's alone (1, 2, 4).
+
+---
+
+## E. Verification at time of audit
 
 `prisma validate` clean · `tsc --noEmit` clean · `eslint src scripts` 0 errors
 (6 pre-existing unused-argument warnings in unrelated provider files) ·
 144 test files / 1496 tests passing · `next build` clean.
 
-**None of the above is evidence of launch readiness.** The readiness gate
-reports ORGANIZATIONAL_ARCHITECTURE READY, PRE_LIVE_ARCHITECTURE NOT_READY,
-LIVE NOT_READY, and no quantity of passing tests can change the last two.
+### At reconciliation, 12 September 2026
+
+`tsc --noEmit` clean · `eslint` 0 errors (the same 6 pre-existing warnings) ·
+155 test files / 1656 tests passing · `next build` clean · CI green on
+`origin/main`.
+
+**None of the above is evidence of launch readiness**, and the growth from
+1496 to 1656 tests is not progress toward launch either — most of it verifies
+that new read-only reporting cannot write and that the blocker taxonomy is
+complete. The readiness gate still reports ORGANIZATIONAL_ARCHITECTURE READY,
+PRE_LIVE_ARCHITECTURE NOT_READY, LIVE NOT_READY, with the same 13 unstaffed
+pre-LIVE capabilities and the same 10 UNKNOWN manual gates as on the day of the
+audit. Nothing in this reconciliation moved a single one of them, because none
+of them are moved by writing code.
