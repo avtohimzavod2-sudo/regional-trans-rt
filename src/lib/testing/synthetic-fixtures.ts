@@ -35,6 +35,18 @@ export const SYNTHETIC_STOP_KEYS = [
   syntheticId("stop", "destination"),
 ] as const;
 
+/** The stop names, exported because a passenger message has to contain one for
+ * extraction to resolve it. Two copies of these strings — one here, one in
+ * whatever writes the message — would be a scenario that silently stops
+ * matching any stop the day someone renames one. */
+export const SYNTHETIC_STOP_NAMES_RU = ["ТЕСТ остановка 1", "ТЕСТ остановка 2", "ТЕСТ остановка 3"] as const;
+export const SYNTHETIC_STOP_NAMES_KY = ["СЫНОО аялдама 1", "СЫНОО аялдама 2", "СЫНОО аялдама 3"] as const;
+export const SYNTHETIC_STOP_NAMES_EN = [
+  "SYNTHETIC TEST stop 1",
+  "SYNTHETIC TEST stop 2",
+  "SYNTHETIC TEST stop 3",
+] as const;
+
 export interface SyntheticGeography {
   corridorId: string;
   /** Stop ids in corridor order: origin, midpoint, destination. */
@@ -70,9 +82,9 @@ export async function ensureSyntheticGeography(): Promise<SyntheticGeography> {
       create: {
         corridorId: corridor.id,
         key,
-        nameRu: `ТЕСТ остановка ${index + 1}`,
-        nameKy: `СЫНОО аялдама ${index + 1}`,
-        nameEn: `SYNTHETIC TEST stop ${index + 1}`,
+        nameRu: SYNTHETIC_STOP_NAMES_RU[index],
+        nameKy: SYNTHETIC_STOP_NAMES_KY[index],
+        nameEn: SYNTHETIC_STOP_NAMES_EN[index],
         order: index,
         // No aliases. Aliases feed the NLP stop matcher, and a synthetic stop
         // that answers to a real place name would let a real inbound message
