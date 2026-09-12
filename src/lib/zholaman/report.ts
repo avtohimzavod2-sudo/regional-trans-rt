@@ -21,7 +21,7 @@
 import { db } from "@/lib/db";
 import { bishkekDateKey, computeWeekOverWeekChange } from "@/lib/artur/period";
 import { paymentStatusForJolaman } from "@/lib/sapargul/zholaman";
-import { percentile, rate, topCounts } from "@/lib/management/metrics";
+import { compareStable, percentile, rate, topCounts } from "@/lib/management/metrics";
 import { detectCargoAnomalies } from "./anomalies";
 import { deliveryCargoDirectionReportSchema, type DeliveryCargoDirectionReport } from "./types";
 
@@ -150,7 +150,7 @@ export async function buildDeliveryCargoDirectionReport(period: ReportPeriod): P
         lifetimeComplaints: record?.complaintsCount ?? 0,
       };
     })
-    .sort((a, b) => (b.ordersInPeriod - a.ordersInPeriod) || a.name.localeCompare(b.name));
+    .sort((a, b) => b.ordersInPeriod - a.ordersInPeriod || compareStable(a.name, b.name));
 
   const assignedOrders = executorGroups.reduce((sum, g) => sum + g._count._all, 0);
   const topExecutorShare = topExecutors.length > 0 ? rate(topExecutors[0].ordersInPeriod, assignedOrders) : null;

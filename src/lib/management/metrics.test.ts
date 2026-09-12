@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatRate, median, minutesBetween, percentile, rate, topCounts } from "./metrics";
+import { compareStable, formatRate, median, minutesBetween, percentile, rate, topCounts } from "./metrics";
 
 describe("rate", () => {
   it("computes a share", () => {
@@ -73,6 +73,32 @@ describe("minutesBetween", () => {
   });
 });
 
+describe("compareStable", () => {
+  it("orders by code unit, so a Cyrillic/Latin tie sorts the same on every platform", () => {
+    // This is the exact pair that turned a green local run into a red CI run:
+    // under ICU collation "Ош → Бишкек" sorts before "s_deleted → Ош" on
+    // Windows and after it on Linux. Code units have no such opinion — "s" is
+    // U+0073, "О" is U+041E, so the Latin row is always first.
+    expect(compareStable("Ош → Бишкек", "s_deleted → Ош")).toBeGreaterThan(0);
+    expect(compareStable("s_deleted → Ош", "Ош → Бишкек")).toBeLessThan(0);
+    expect(compareStable("Ош", "Ош")).toBe(0);
+  });
+
+  it("does not fold case the way a collator would", () => {
+    // Locale-aware comparison treats "a" and "A" as near-equal and decides the
+    // tie by a tertiary rule; here uppercase simply comes first, always.
+    expect(compareStable("A", "a")).toBeLessThan(0);
+  });
+
+  it("disagrees with localeCompare on the mixed-script case, on purpose", () => {
+    // Guards the fix itself: if someone reverts compareStable to a delegating
+    // implementation, this fails on at least one of the two platforms rather
+    // than silently reintroducing machine-dependent report ordering.
+    const byCodeUnit = ["Ош → Бишкек", "s_deleted → Ош"].sort(compareStable);
+    expect(byCodeUnit).toEqual(["s_deleted → Ош", "Ош → Бишкек"]);
+  });
+});
+
 describe("topCounts", () => {
   it("orders by frequency and truncates to the limit", () => {
     expect(topCounts(["a", "b", "a", "c", "a", "b"], 2)).toEqual([
@@ -83,8 +109,11 @@ describe("topCounts", () => {
 
   // A report whose row order changes on identical data cannot be diffed
   // between periods, which is most of what a manager does with it.
-  it("breaks ties alphabetically so output is stable", () => {
+  it("breaks ties by code unit so output is stable", () => {
     expect(topCounts(["zebra", "alpha", "mid"], 3).map((row) => row.value)).toEqual(["alpha", "mid", "zebra"]);
+    // Decline reasons and cargo types are Russian, so the tie-break has to be
+    // pinned across scripts too, not just within ASCII.
+    expect(topCounts(["Дорого", "zebra", "Занят"], 3).map((row) => row.value)).toEqual(["zebra", "Дорого", "Занят"]);
   });
 
   it("returns an empty list for no input", () => {

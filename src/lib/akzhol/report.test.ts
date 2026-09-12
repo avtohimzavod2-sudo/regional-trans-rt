@@ -214,10 +214,13 @@ describe("buildPassengerDirectionReport", () => {
     const report = await buildPassengerDirectionReport(PERIOD);
 
     expect(report.demand).toEqual({ requests: 4, seatsRequested: 7 });
+    // The two one-request rows are tied, and the tie is broken by code unit
+    // (compareStable), not by locale — so "s_deleted" precedes "Ош" and does so
+    // identically on a Windows workstation and on Linux CI.
     expect(report.directions).toEqual([
       { direction: "Бишкек → Ош", originStopId: "s1", destinationStopId: "s2", requests: 2 },
-      { direction: "Ош → Бишкек", originStopId: "s2", destinationStopId: "s1", requests: 1 },
       { direction: "s_deleted → Ош", originStopId: "s_deleted", destinationStopId: "s2", requests: 1 },
+      { direction: "Ош → Бишкек", originStopId: "s2", destinationStopId: "s1", requests: 1 },
     ]);
   });
 

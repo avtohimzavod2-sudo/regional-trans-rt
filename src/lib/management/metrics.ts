@@ -54,15 +54,31 @@ export function minutesBetween(from: Date | null | undefined, to: Date | null | 
   return Math.round(ms / 60_000);
 }
 
-/** Counts occurrences and returns the `limit` most frequent, ties broken
- * alphabetically so the output is stable across runs (a report whose row order
- * changes on identical data cannot be diffed). */
+/** Tie-break comparator for report rows. Deliberately NOT `localeCompare`.
+ *
+ * `localeCompare` resolves through the platform's ICU data, so a tie between a
+ * Cyrillic and a Latin string — "Ош → Бишкек" against "s_deleted → Ош" — sorts
+ * one way on a developer's Windows machine and the other way on CI's Linux.
+ * That is a real defect this cost a red build to find: a report whose row order
+ * depends on where it ran cannot be diffed, and a test pinning that order is
+ * only pinning one machine.
+ *
+ * Code-unit order is the same everywhere. It is not linguistically correct
+ * ordering, and it does not need to be: this decides ties between rows that are
+ * already equal on the thing the reader cares about. */
+export function compareStable(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** Counts occurrences and returns the `limit` most frequent, ties broken by
+ * `compareStable` so the output is identical on every machine (a report whose
+ * row order changes on identical data cannot be diffed). */
 export function topCounts(values: readonly string[], limit: number): Array<{ value: string; count: number }> {
   const counts = new Map<string, number>();
   for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
   return [...counts.entries()]
     .map(([value, count]) => ({ value, count }))
-    .sort((a, b) => (b.count - a.count) || a.value.localeCompare(b.value))
+    .sort((a, b) => b.count - a.count || compareStable(a.value, b.value))
     .slice(0, limit);
 }
 

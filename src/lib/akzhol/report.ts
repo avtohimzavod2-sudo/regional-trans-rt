@@ -22,7 +22,7 @@
 //     manager needs volumes and failure modes, not amounts.
 import { db } from "@/lib/db";
 import { bishkekDateKey } from "@/lib/artur/period";
-import { median, minutesBetween, percentile, rate, topCounts } from "@/lib/management/metrics";
+import { compareStable, median, minutesBetween, percentile, rate, topCounts } from "@/lib/management/metrics";
 import { detectPassengerAnomalies } from "./anomalies";
 import { NO_REASON_RECORDED, passengerDirectionReportSchema, type PassengerDirectionReport } from "./types";
 
@@ -144,7 +144,7 @@ export async function buildPassengerDirectionReport(period: ReportPeriod): Promi
       destinationStopId: group.destinationStopId,
       requests: group._count._all,
     }))
-    .sort((a, b) => (b.requests - a.requests) || a.direction.localeCompare(b.direction))
+    .sort((a, b) => b.requests - a.requests || compareStable(a.direction, b.direction))
     .slice(0, TOP_DIRECTIONS);
   if (directionGroups.length > TOP_DIRECTIONS) {
     missingDataNotes.push(`directions lists the ${TOP_DIRECTIONS} busiest of ${directionGroups.length} observed origin/destination pairs.`);

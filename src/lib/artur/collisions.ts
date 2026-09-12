@@ -28,7 +28,14 @@ export function findCapabilityConflicts(contracts: AgentContract[]): CapabilityC
   for (const [capability, owners] of ownersByCapability) {
     if (owners.length > 1) conflicts.push({ capability, owners });
   }
-  return conflicts.sort((a, b) => a.capability.localeCompare(b.capability));
+  // Code-unit order, not localeCompare: capability ids contain underscores,
+  // which ICU collation treats as variable-weight punctuation, so "CARGO_A"
+  // and "CARGOB" can swap between platforms. This list is rendered into a
+  // build-failing error message, and an error message that reorders itself by
+  // machine is the same defect that already cost one red CI run (see
+  // compareStable in src/lib/management/metrics.ts). Kept inline rather than
+  // imported so this module stays dependency-free apart from its own types.
+  return conflicts.sort((a, b) => (a.capability < b.capability ? -1 : a.capability > b.capability ? 1 : 0));
 }
 
 export class CapabilityCollisionError extends Error {
