@@ -11,6 +11,14 @@ import {
   type PostSpecification,
 } from "./blockers";
 import { RT_ACCOUNTABILITY_MATRIX, type RtCapability } from "./capabilities";
+import {
+  awaitedParties,
+  engineeringPosture,
+  outstandingEngineeringWork,
+  GATE_EVIDENCE,
+  type EngineeringPosture,
+  type EvidenceKind,
+} from "./gate-evidence";
 import { RT_ORG_NODES, type RtOrgNode } from "./org";
 import { countByBasis, preLiveFlagsNeedingFounderReview, PRE_LIVE_BASIS_RULES } from "./pre-live-basis";
 import { evaluateReadiness, MANUAL_PRE_LIVE_GATES } from "./readiness";
@@ -28,6 +36,19 @@ function statusTag(id: string): string {
   if (!node) return `${id} **(UNKNOWN NODE)**`;
   return node.status === "IMPLEMENTED" ? id : `${id} *(planned)*`;
 }
+
+const AWAITED_PARTY_LABEL: Record<EvidenceKind, string> = {
+  ENGINEERING_ARTIFACT: "engineering",
+  EXTERNAL_PROVIDER_RECORD: "a provider",
+  HUMAN_ACT: "a person",
+  FOUNDER_DECISION: "the Founder",
+};
+
+const ENGINEERING_POSTURE_LABEL: Record<EngineeringPosture, string> = {
+  ENGINEERING_OUTSTANDING: "work outstanding",
+  ENGINEERING_COMPLETE: "done — waiting on others",
+  NOTHING_FOR_ENGINEERING_TO_DO: "not a code problem",
+};
 
 function groupByDomain(matrix: RtCapability[]): Map<string, RtCapability[]> {
   const grouped = new Map<string, RtCapability[]>();
@@ -195,13 +216,57 @@ export function renderPreLiveReadinessDoc(): string {
     "No amount of test coverage can satisfy these. Each requires an explicit human attestation; absent one, the gate is UNKNOWN and LIVE stays blocked.",
   );
   lines.push("");
-  lines.push("| Gate | Status |");
-  lines.push("| --- | --- |");
+  lines.push("| Gate | Status | Waiting on | Engineering |");
+  lines.push("| --- | --- | --- | --- |");
   for (const gate of report.manualGates) {
-    lines.push(`| \`${gate.gate}\` | ${gate.status} |`);
+    const parties = awaitedParties(gate.gate).map((k) => AWAITED_PARTY_LABEL[k]);
+    lines.push(
+      `| \`${gate.gate}\` | ${gate.status} | ${parties.join(", ") || "—"} | ${ENGINEERING_POSTURE_LABEL[engineeringPosture(gate.gate)]} |`,
+    );
   }
   lines.push("");
   lines.push(`Total manual gates: ${MANUAL_PRE_LIVE_GATES.length}.`);
+  lines.push("");
+  lines.push(
+    "**UNKNOWN is not FAIL.** A gate is UNKNOWN because nobody has looked, and each one has a specific way to be looked at. It is also not readiness: a gate stays closed until someone attests, and no artifact in this repository can attest on a person's behalf.",
+  );
+  lines.push("");
+
+  lines.push("### What would settle each gate");
+  lines.push("");
+  for (const entry of GATE_EVIDENCE) {
+    lines.push(`#### \`${entry.gate}\``);
+    lines.push("");
+    lines.push(entry.whyUnknown);
+    lines.push("");
+    lines.push(`Attested by **${displayName(entry.attestedBy)}** once the evidence exists:`);
+    lines.push("");
+    for (const item of entry.evidence) {
+      // A checkbox only where this repository can honestly tick it. Everything
+      // else happens outside, and a box RT cannot check must not look checkable.
+      const mark = item.kind === "ENGINEERING_ARTIFACT" ? (item.present ? "[x] " : "[ ] ") : "";
+      const where = item.where ? ` *(${item.where})*` : "";
+      lines.push(`- ${mark}**${AWAITED_PARTY_LABEL[item.kind]}** — ${item.description}${where}`);
+    }
+    lines.push("");
+  }
+
+  const outstanding = outstandingEngineeringWork();
+  lines.push("### What engineering can build now");
+  lines.push("");
+  if (outstanding.length === 0) {
+    lines.push("Nothing. Every remaining piece of evidence is a person, a provider or a Founder decision.");
+  } else {
+    lines.push(
+      "The honest engineering backlog behind the unknowns. None of these close a gate on their own — they are the material the attester needs in order to have something to look at.",
+    );
+    lines.push("");
+    for (const { gate, items } of outstanding) {
+      for (const item of items) {
+        lines.push(`- \`${gate}\` — ${item.description}`);
+      }
+    }
+  }
   lines.push("");
 
   lines.push("## Why each capability is required before LIVE");
