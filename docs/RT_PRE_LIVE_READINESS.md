@@ -126,6 +126,31 @@ No amount of test coverage can satisfy these. Each requires an explicit human at
 
 Total manual gates: 10.
 
+## Why each capability is required before LIVE
+
+The pre-LIVE line was drawn by one engineer and has business and legal consequences. Rather than asking for 33 booleans to be reviewed, each flag is traced to a stated rule, so the rules can be reviewed once and only the residue needs a per-capability decision.
+
+| Basis | Pre-LIVE capabilities | Cannot be deferred | Why |
+| --- | --- | --- | --- |
+| `MONEY_MOVES` | 7 | yes | Real customer money is involved. An error here is not recoverable by an apology. |
+| `PHYSICAL_SAFETY` | 4 | yes | A person gets into a stranger's vehicle. Unverified drivers and unhandled safety incidents cause physical harm, which no refund undoes. |
+| `PERSONAL_DATA` | 2 | yes | RT holds identifiable data about passengers and drivers, and holding it is itself a duty. |
+| `LEGAL_EXPOSURE` | 1 | yes | Operating unlawfully is not a degraded mode of operating. |
+| `ABUSE_AND_FRAUD` | 1 | depends on scale | Without detection, a fake driver or a collusive pattern is indistinguishable from normal business until the loss is realized. |
+| `CUSTOMER_RECOURSE` | 3 | depends on scale | A customer who has been wronged needs somewhere to go, or RT's only answer is silence. |
+| `OPERATIONAL_CONTINUITY` | 3 | depends on scale | A platform that cannot be restored, rolled back or watched is one incident from data loss. |
+| `CORE_SERVICE_LOOP` | 10 | depends on scale | On the path a passenger actually travels: ask, match, book, ride. Without these there is no product to launch, so the flag is a tautology rather than a judgment. |
+| `LAUNCH_AUTHORITY` | 1 | depends on scale | Someone must decide to launch. Structural, not a judgment about scope. |
+
+"Cannot be deferred" marks the bases where no engineering decision may postpone the requirement: customer money, physical safety, personal data, legality. The rest scale with exposure — a hand-picked pilot is not an open market — so their flags are genuinely the Founder's to set.
+
+### Flags that need a Founder decision
+
+2, out of 51 capabilities:
+
+- `drive_crm_event_write` (DRIVER_OPS) — marked pre-LIVE on judgment alone — confirm it or drop it.
+- `cargo_payment_confirmation` (FINANCE) — **a rule says this cannot wait and the flag says it can** (MONEY_MOVES).
+
 ## How this is enforced
 
 - `src/lib/governance/org.ts` — who exists and who is accountable, classified by observed code behavior.

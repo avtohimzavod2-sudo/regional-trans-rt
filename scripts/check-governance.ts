@@ -21,6 +21,8 @@ import { assertGovernanceValid } from "../src/lib/governance/validate";
 import { evaluateReadiness } from "../src/lib/governance/readiness";
 import { RT_ORG_NODES } from "../src/lib/governance/org";
 import { RT_ACCOUNTABILITY_MATRIX } from "../src/lib/governance/capabilities";
+import { blockersOfKind, type BlockerKind } from "../src/lib/governance/blockers";
+import { preLiveFlagsNeedingFounderReview } from "../src/lib/governance/pre-live-basis";
 
 const report = evaluateReadiness();
 const planned = RT_ORG_NODES.filter((n) => n.status === "PLANNED").length;
@@ -46,6 +48,29 @@ const unattested = report.manualGates.filter((g) => g.status !== "READY");
 if (unattested.length > 0) {
   console.log(`Manual gates not attested (${unattested.length}): no test can satisfy these.`);
   for (const gate of unattested) console.log(`  - ${gate.gate}: ${gate.status}`);
+  console.log("");
+}
+
+// What kind of thing is missing, since the four kinds are closed by four
+// different people. A vacant post is never reported as missing code.
+const KINDS: BlockerKind[] = [
+  "SOFTWARE_BLOCKER",
+  "HUMAN_STAFFING_BLOCKER",
+  "EXTERNAL_PROVIDER_BLOCKER",
+  "FOUNDER_DECISION_BLOCKER",
+];
+console.log("Blockers by kind (see docs/RT_PRE_LIVE_BLOCKERS.md):");
+for (const kind of KINDS) {
+  const blockers = blockersOfKind(kind);
+  console.log(`  ${kind.padEnd(26)} ${blockers.length}`);
+  for (const blocker of blockers) console.log(`    - ${blocker.id}`);
+}
+console.log("");
+
+const flagReview = preLiveFlagsNeedingFounderReview();
+if (flagReview.length > 0) {
+  console.log(`Pre-LIVE flags resting on judgment rather than a rule (${flagReview.length}):`);
+  for (const f of flagReview) console.log(`  - ${f.capability}: ${f.review} (${f.basis})`);
   console.log("");
 }
 

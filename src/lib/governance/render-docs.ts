@@ -12,6 +12,7 @@ import {
 } from "./blockers";
 import { RT_ACCOUNTABILITY_MATRIX, type RtCapability } from "./capabilities";
 import { RT_ORG_NODES, type RtOrgNode } from "./org";
+import { countByBasis, preLiveFlagsNeedingFounderReview, PRE_LIVE_BASIS_RULES } from "./pre-live-basis";
 import { evaluateReadiness, MANUAL_PRE_LIVE_GATES } from "./readiness";
 import { validateGovernance } from "./validate";
 
@@ -201,6 +202,44 @@ export function renderPreLiveReadinessDoc(): string {
   }
   lines.push("");
   lines.push(`Total manual gates: ${MANUAL_PRE_LIVE_GATES.length}.`);
+  lines.push("");
+
+  lines.push("## Why each capability is required before LIVE");
+  lines.push("");
+  lines.push(
+    "The pre-LIVE line was drawn by one engineer and has business and legal consequences. Rather than asking for 33 booleans to be reviewed, each flag is traced to a stated rule, so the rules can be reviewed once and only the residue needs a per-capability decision.",
+  );
+  lines.push("");
+  lines.push("| Basis | Pre-LIVE capabilities | Cannot be deferred | Why |");
+  lines.push("| --- | --- | --- | --- |");
+  const counts = countByBasis();
+  for (const rule of PRE_LIVE_BASIS_RULES) {
+    lines.push(
+      `| \`${rule.basis}\` | ${counts.get(rule.basis) ?? 0} | ${rule.impliesPreLive ? "yes" : "depends on scale"} | ${rule.reason} |`,
+    );
+  }
+  lines.push("");
+  lines.push(
+    "\"Cannot be deferred\" marks the bases where no engineering decision may postpone the requirement: customer money, physical safety, personal data, legality. The rest scale with exposure — a hand-picked pilot is not an open market — so their flags are genuinely the Founder's to set.",
+  );
+  lines.push("");
+
+  const review = preLiveFlagsNeedingFounderReview();
+  lines.push("### Flags that need a Founder decision");
+  lines.push("");
+  if (review.length === 0) {
+    lines.push("None: every flag follows from a rule above.");
+  } else {
+    lines.push(`${review.length}, out of ${RT_ACCOUNTABILITY_MATRIX.length} capabilities:`);
+    lines.push("");
+    for (const f of review) {
+      const verdict =
+        f.review === "REQUIRED_ON_JUDGMENT_ALONE"
+          ? "marked pre-LIVE on judgment alone — confirm it or drop it"
+          : `**a rule says this cannot wait and the flag says it can** (${f.basis})`;
+      lines.push(`- \`${f.capability}\` (${f.domain}) — ${verdict}.`);
+    }
+  }
   lines.push("");
 
   lines.push("## How this is enforced");

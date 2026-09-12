@@ -47,6 +47,16 @@ describe("generated governance docs", () => {
     expect(doc).toContain("PASSENGER_CASHIER *(planned)*");
   });
 
+  it("traces the pre-LIVE line to rules and names the residue that needs a decision", () => {
+    const doc = renderPreLiveReadinessDoc();
+
+    expect(doc).toContain("Why each capability is required before LIVE");
+    expect(doc).toContain("`MONEY_MOVES`");
+    // The two review items must be visible in the doc, not only in the model.
+    expect(doc).toContain("`drive_crm_event_write`");
+    expect(doc).toContain("`cargo_payment_confirmation`");
+  });
+
   it("states the reviewer/approver distinction in the doc itself", () => {
     expect(renderAccountabilityMatrixDoc()).toContain("A reviewer is *not* an approver.");
   });
