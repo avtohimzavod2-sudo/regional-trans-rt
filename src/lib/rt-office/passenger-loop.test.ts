@@ -103,7 +103,7 @@ describe("run-level transitions — legality (spec O)", () => {
 
     expect(row.status).toBe("MATCHING");
     expect(dbMocks.passengerLoopRun.updateMany).toHaveBeenCalledWith({
-      where: { id: "loop-1", status: { in: ["SUPPLY_REQUESTED", "NO_SUPPLY", "OFFER_READY", "PASSENGER_DECLINED", "EXPIRED"] } },
+      where: { id: "loop-1", status: { in: ["SUPPLY_REQUESTED", "NO_SUPPLY", "OFFER_READY", "OFFER_SENT", "PASSENGER_DECLINED", "EXPIRED"] } },
       data: { status: "MATCHING" },
     });
   });

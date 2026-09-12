@@ -49,7 +49,10 @@ export class LoopTransitionError extends Error {
 const LEGAL_RUN_TRANSITIONS: Record<Exclude<PassengerLoopStatus, "NEW">, PassengerLoopStatus[]> = {
   NORMALIZED: ["NEW"],
   SUPPLY_REQUESTED: ["NORMALIZED"],
-  MATCHING: ["SUPPLY_REQUESTED", "NO_SUPPLY", "OFFER_READY", "PASSENGER_DECLINED", "EXPIRED"],
+  // OFFER_SENT is here for the seat race: the passenger's confirmation arrived
+  // and lost the seat to a concurrent one, so the real engine unwound the Match
+  // and re-searched from a run that had already sent an offer.
+  MATCHING: ["SUPPLY_REQUESTED", "NO_SUPPLY", "OFFER_READY", "OFFER_SENT", "PASSENGER_DECLINED", "EXPIRED"],
   OFFER_READY: ["MATCHING"],
   NO_SUPPLY: ["MATCHING", "SUPPLY_REQUESTED", "OFFER_READY"],
   OFFER_SENT: ["OFFER_READY"],
@@ -258,6 +261,27 @@ export async function recordPassengerAccepted(ctx: AgentContext, loopRunId: stri
   return row;
 }
 
+/** Records the rematch the caller has already performed, and its outcome.
+ *
+ * `rematched` reports on a real proposeMatchesForRequest call that has already
+ * happened by the time any of the recovery paths below is reached, so the run
+ * genuinely passed back through MATCHING whichever way it went. Jumping
+ * straight to NO_SUPPLY skipped a transition that really occurred — and,
+ * because NO_SUPPLY legally follows only MATCHING/SUPPLY_REQUESTED/OFFER_READY,
+ * it also threw LoopTransitionError out of the webhook handler from every
+ * PASSENGER_DECLINED, EXPIRED or OFFER_SENT state. The unit suite mocks the
+ * transition table away, so only a real run against Postgres exposed it. */
+async function recordRematchOutcome(
+  ctx: AgentContext,
+  loopRunId: string,
+  rematched: boolean,
+  noSupplyDetail: string,
+): Promise<PassengerLoopRunRow> {
+  const { row } = await transitionLoop(ctx, loopRunId, "MATCHING");
+  if (rematched) return row;
+  return recordNoSupply(ctx, loopRunId, "NO_SUPPLY", noSupplyDetail);
+}
+
 /** OFFER_SENT -> PASSENGER_DECLINED, then immediately on to MATCHING/NO_SUPPLY
  * depending on whether the real engine's own rematch attempt (already
  * triggered inside handlePassengerResponse's decline branch) found a next
@@ -266,11 +290,7 @@ export async function recordPassengerDeclined(ctx: AgentContext, loopRunId: stri
   const offer = await db.passengerLoopOffer.findUnique({ where: { matchId } });
   if (offer) await transitionLoopOffer(ctx, offer.id, "REJECTED");
   await transitionLoop(ctx, loopRunId, "PASSENGER_DECLINED");
-  if (rematched) {
-    const { row } = await transitionLoop(ctx, loopRunId, "MATCHING");
-    return row;
-  }
-  return recordNoSupply(ctx, loopRunId, "NO_SUPPLY", "NO_CANDIDATES_AFTER_PASSENGER_DECLINE");
+  return recordRematchOutcome(ctx, loopRunId, rematched, "NO_CANDIDATES_AFTER_PASSENGER_DECLINE");
 }
 
 /** The passenger's confirmation CAS won, but the seat-decrement CAS then
@@ -281,11 +301,7 @@ export async function recordPassengerDeclined(ctx: AgentContext, loopRunId: stri
 export async function recordOfferInvalidatedBySeatRace(ctx: AgentContext, loopRunId: string, matchId: string, rematched: boolean): Promise<PassengerLoopRunRow> {
   const offer = await db.passengerLoopOffer.findUnique({ where: { matchId } });
   if (offer) await transitionLoopOffer(ctx, offer.id, "INVALIDATED");
-  if (rematched) {
-    const { row } = await transitionLoop(ctx, loopRunId, "MATCHING");
-    return row;
-  }
-  return recordNoSupply(ctx, loopRunId, "NO_SUPPLY", "SEAT_LOST_TO_CONCURRENT_PASSENGER");
+  return recordRematchOutcome(ctx, loopRunId, rematched, "SEAT_LOST_TO_CONCURRENT_PASSENGER");
 }
 
 /** A proposed Match expired unanswered (driver or passenger side) — the real
@@ -295,11 +311,7 @@ export async function recordOfferExpired(ctx: AgentContext, loopRunId: string, m
   const offer = await db.passengerLoopOffer.findUnique({ where: { matchId } });
   if (offer) await transitionLoopOffer(ctx, offer.id, "EXPIRED");
   await transitionLoop(ctx, loopRunId, "EXPIRED");
-  if (rematched) {
-    const { row } = await transitionLoop(ctx, loopRunId, "MATCHING");
-    return row;
-  }
-  return recordNoSupply(ctx, loopRunId, "NO_SUPPLY", "NO_CANDIDATES_AFTER_EXPIRY");
+  return recordRematchOutcome(ctx, loopRunId, rematched, "NO_CANDIDATES_AFTER_EXPIRY");
 }
 
 /** The passenger demand itself was withdrawn/cancelled (pre-Trip). Any
