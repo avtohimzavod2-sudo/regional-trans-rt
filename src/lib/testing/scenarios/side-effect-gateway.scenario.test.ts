@@ -38,6 +38,7 @@ import { sendTelegramDirectMessage, sendTelegramMessage } from "@/lib/messaging/
 import { sendWhatsAppText } from "@/lib/messaging/whatsapp";
 import { makeDriver, makePassenger } from "@/lib/testing/factories";
 import { runScenarios } from "@/lib/testing/scenario-runner";
+import { SyntheticRecipientError } from "@/lib/testing/synthetic";
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -150,8 +151,58 @@ describe("SideEffectGateway cold-audit scenario batch", () => {
   it("control: the identical LIVE call reaches the mocked transport OUTSIDE any scenario context, proving the gate is scenario-specific rather than having silently broken LIVE mode", async () => {
     process.env.MIRA_OUTBOUND_MODE = "LIVE";
 
-    await notifyDriverPrivately(makeDriver().telegramUserId, "hello outside any scenario");
+    // A plain numeric Telegram id, not makeDriver()'s. The factories mark their
+    // contact identifiers as synthetic, and a synthetic recipient is refused in
+    // every context — which would make this control pass for the wrong reason
+    // and stop detecting a silently broken LIVE mode.
+    await notifyDriverPrivately("184722901", "hello outside any scenario");
 
     expect(sendMessageMock).toHaveBeenCalledTimes(1);
+  });
+
+  // The scenario batch above covers sends made *during* a scenario. This covers
+  // the gap that leaves: a synthetic driver or passenger persisted by a
+  // scenario is still in the database afterwards, where the expiry sweep, a
+  // follow-up job or a dispatcher click reaches it with no scenario context
+  // anywhere on the stack.
+  it("refuses to send to a synthetic recipient OUTSIDE any scenario context, with every mode set to LIVE", async () => {
+    process.env.MIRA_OUTBOUND_MODE = "LIVE";
+    process.env.ACQUISITION_OUTREACH_MODE = "LIVE";
+
+    const driver = makeDriver();
+    const passenger = makePassenger();
+
+    await expect(sendTelegramMessage(driver.telegramUserId, "hi")).rejects.toThrow(SyntheticRecipientError);
+    await expect(sendTelegramDirectMessage(driver.telegramUserId, "hi")).rejects.toThrow(SyntheticRecipientError);
+    await expect(sendWhatsAppText(passenger.whatsappId, "hi")).rejects.toThrow(SyntheticRecipientError);
+    await expect(notifyDriverPrivately(driver.telegramUserId, "hi")).rejects.toThrow(SyntheticRecipientError);
+    await expect(notifyPassengerText(passenger.whatsappId, "hi")).rejects.toThrow(SyntheticRecipientError);
+    await expect(notifyPassengerWithConfirmButtons(passenger.whatsappId, "hi", "match-1")).rejects.toThrow(
+      SyntheticRecipientError,
+    );
+
+    expect(sendMessageMock).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("records an honest FAILED rather than a fabricated SENT when acquisition outreach targets a synthetic prospect", async () => {
+    // The refusal must not be laundered into a success anywhere upstream:
+    // whatever the reason a send did not happen, RT never claims it did (s.32).
+    process.env.ACQUISITION_OUTREACH_MODE = "LIVE";
+
+    const outcome = await sendAcquisitionOutreach({
+      contractorAgent: "PASSENGER_CONTRACTOR",
+      prospectType: "PASSENGER",
+      prospectRef: "p-synthetic",
+      channel: "WHATSAPP",
+      sourceType: "TELEGRAM_GROUP",
+      sourceRef: null,
+      to: makePassenger().whatsappId,
+      text: "hello",
+      idempotencyKey: "outside-scenario:acquisition:whatsapp:p-synthetic",
+    });
+
+    expect(outcome.status).toBe("FAILED");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

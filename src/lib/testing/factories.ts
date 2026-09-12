@@ -3,6 +3,16 @@
 // src/lib/matching/*.test.ts (see orchestrate.test.ts's matchRecord /
 // requestRecord) rather than inventing a new shape — these are the record
 // shapes the real orchestrator/expiry code actually destructures.
+//
+// Contact identifiers carry the synthetic marker; internal record ids do not.
+// The distinction is not cosmetic: a whatsappId or telegramUserId is something
+// RT can send a message to, and marking it means the send boundary refuses it
+// even outside a scenario (src/lib/testing/synthetic.ts). A match id or a
+// request id cannot be sent to, so marking those would only make test output
+// harder to read and break the exact-id assertions resetFactoryCounter exists
+// to support.
+import { syntheticId } from "./synthetic";
+
 let counter = 0;
 
 /** Test-only: resets the id counter so a test file asserting on exact
@@ -28,7 +38,7 @@ export interface TestDriver {
 export function makeDriver(overrides: Partial<TestDriver> = {}): TestDriver {
   const id = nextId("driver");
   return {
-    telegramUserId: `tg-${id}`,
+    telegramUserId: syntheticId("tg", id),
     preferredLang: "RU",
     phone: null,
     name: "Test Driver",
@@ -48,7 +58,7 @@ export interface TestPassenger {
 export function makePassenger(overrides: Partial<TestPassenger> = {}): TestPassenger {
   const id = nextId("passenger");
   return {
-    whatsappId: `wa-${id}`,
+    whatsappId: syntheticId("wa", id),
     preferredLang: "RU",
     phone: null,
     name: "Test Passenger",

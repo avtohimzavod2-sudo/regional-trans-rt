@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { isScenarioContext, ScenarioSuppressedSendError } from "@/lib/testing/scenario-context";
+import { assertRealRecipient } from "@/lib/testing/synthetic";
 
 const GRAPH_VERSION = "v21.0";
 
@@ -23,6 +24,9 @@ export async function sendWhatsAppText(to: string, body: string) {
   // Throwing is caught by sendAcquisitionOutreach's existing try/catch and
   // honestly recorded as FAILED instead.
   if (isScenarioContext()) throw new ScenarioSuppressedSendError("WhatsApp");
+  // Second, independent net: a synthetic passenger persisted by an earlier
+  // scenario can be picked up later by a job running outside one.
+  assertRealRecipient("WhatsApp", to);
   const res = await fetch(apiUrl("messages"), {
     method: "POST",
     headers: authHeaders(),
@@ -41,6 +45,7 @@ export async function sendWhatsAppText(to: string, body: string) {
 
 export async function sendWhatsAppConfirmButtons(to: string, body: string, matchId: string) {
   if (isScenarioContext()) throw new ScenarioSuppressedSendError("WhatsApp");
+  assertRealRecipient("WhatsApp", to);
   const res = await fetch(apiUrl("messages"), {
     method: "POST",
     headers: authHeaders(),
