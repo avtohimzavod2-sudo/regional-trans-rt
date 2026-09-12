@@ -119,15 +119,15 @@ enum NoSupplyReason {
 // truth for seat/driver/trip facts: those stay exclusively in
 // TripRequest/Match/Trip/DriverOffer.
 model PassengerLoopRun {
-  id              String              @id @default(cuid())
-  tripRequestId   String              @unique
-  tripRequest     TripRequest         @relation(fields: [tripRequestId], references: [id])
-  correlationId   String              @unique // root AgentContext.traceId for this passenger demand
-  status          PassengerLoopStatus @default(NEW)
-  noSupplyReason  NoSupplyReason?
-  noSupplyDetail  String? // free-text diagnostic (e.g. "JOLCHU_TIMEOUT", "CRM_AUTO_TIMEOUT") — never a second enum
-  createdAt       DateTime            @default(now())
-  updatedAt       DateTime            @updatedAt
+  id             String              @id @default(cuid())
+  tripRequestId  String              @unique
+  tripRequest    TripRequest         @relation(fields: [tripRequestId], references: [id])
+  correlationId  String              @unique // root AgentContext.traceId for this passenger demand
+  status         PassengerLoopStatus @default(NEW)
+  noSupplyReason NoSupplyReason?
+  noSupplyDetail String? // free-text diagnostic (e.g. "JOLCHU_TIMEOUT", "CRM_AUTO_TIMEOUT") — never a second enum
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
 
   offers PassengerLoopOffer[]
 
@@ -140,14 +140,14 @@ model PassengerLoopRun {
 // established convention — this table observes the real Match, it never
 // owns or mutates it.
 model PassengerLoopOffer {
-  id          String                   @id @default(cuid())
-  loopRunId   String
-  loopRun     PassengerLoopRun         @relation(fields: [loopRunId], references: [id])
-  matchId     String                   @unique
+  id            String                   @id @default(cuid())
+  loopRunId     String
+  loopRun       PassengerLoopRun         @relation(fields: [loopRunId], references: [id])
+  matchId       String                   @unique
   driverOfferId String
-  status      PassengerLoopOfferStatus @default(CANDIDATE)
-  createdAt   DateTime                 @default(now())
-  updatedAt   DateTime                 @updatedAt
+  status        PassengerLoopOfferStatus @default(CANDIDATE)
+  createdAt     DateTime                 @default(now())
+  updatedAt     DateTime                 @updatedAt
 
   @@index([loopRunId])
 }
@@ -356,28 +356,28 @@ model Driver {
 }
 
 model TripRequest {
-  id                    String        @id @default(cuid())
+  id                    String            @id @default(cuid())
   passengerId           String
-  passenger             Passenger     @relation(fields: [passengerId], references: [id])
+  passenger             Passenger         @relation(fields: [passengerId], references: [id])
   originStopId          String
-  origin                Stop          @relation("RequestOrigin", fields: [originStopId], references: [id])
+  origin                Stop              @relation("RequestOrigin", fields: [originStopId], references: [id])
   destinationStopId     String
-  destination           Stop          @relation("RequestDestination", fields: [destinationStopId], references: [id])
-  travelDate            DateTime      @db.Date
+  destination           Stop              @relation("RequestDestination", fields: [destinationStopId], references: [id])
+  travelDate            DateTime          @db.Date
   timeWindowStart       String? // "HH:mm", free-form time-of-day preference
   timeWindowEnd         String?
-  seats                 Int           @default(1)
+  seats                 Int               @default(1)
   luggage               String? // free-text luggage description
   pickupPoint           String? // free-text pickup detail within origin stop
-  femaleOnlyDriver      Boolean       @default(false) // safety preference: only propose to a driver who declared isFemale
-  travelingWithChildren Boolean       @default(false)
-  status                RequestStatus @default(PENDING)
-  sourceChannel         Channel       @default(WHATSAPP)
-  rawMessageId          String?       @unique
-  rawMessage            RawMessage?   @relation(fields: [rawMessageId], references: [id])
+  femaleOnlyDriver      Boolean           @default(false) // safety preference: only propose to a driver who declared isFemale
+  travelingWithChildren Boolean           @default(false)
+  status                RequestStatus     @default(PENDING)
+  sourceChannel         Channel           @default(WHATSAPP)
+  rawMessageId          String?           @unique
+  rawMessage            RawMessage?       @relation(fields: [rawMessageId], references: [id])
   expiresAt             DateTime?
-  createdAt             DateTime      @default(now())
-  updatedAt             DateTime      @updatedAt
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
   matches               Match[]
   passengerLoopRun      PassengerLoopRun?
 
@@ -622,6 +622,64 @@ model RawMessage {
   driverOffers         DriverOffer[]
 
   @@index([channel, chatId, createdAt])
+}
+
+// Passenger-side financial intent (Mira spec s.18-s.20; cold audit B4).
+//
+// Mira is not a cashier. She records an INTENT that a future passenger cashier
+// will consume, and never moves money. See docs/FINANCIAL_BOUNDARIES.md.
+//
+// This is a dedicated model rather than an AuditLogEntry row for exactly one
+// reason: the dedupe guarantee has to be enforced by the database.
+// AuditLogEntry is a general-purpose append-only log whose
+// (entityType, entityId) index is deliberately NON-unique -- many legitimate
+// entries share a subject, and several actions repeat against the same entity
+// -- so making it unique there would break unrelated logging. A
+// findFirst-before-create check against it is best-effort and loses a
+// concurrent double-delivery race, which on a payment path means a double
+// charge. `idempotencyKey @unique` is the same guard already used by
+// NotificationDelivery, ShipmentPayment, AcquisitionOutreachEvent and
+// DriveCrmEvent; this path was the exception.
+//
+// The AuditLogEntry write is kept alongside as the human-readable trace. The
+// row below is the record of truth for whether the intent exists.
+enum PassengerPaymentType {
+  PASSENGER_EXTRA_BAGGAGE_FEE
+}
+
+enum PassengerFinancialReason {
+  SIGNIFICANT_EXCESS_BAGGAGE
+}
+
+model PassengerFinancialIntent {
+  id String @id @default(cuid())
+
+  paymentType PassengerPaymentType
+  reason      PassengerFinancialReason
+  amountSom   Int // whole som, matching every other money column in this schema
+  currency    String                   @default("KGS")
+
+  conversationId String
+  customerRef    String
+  tripId         String?
+  bookingId      String?
+
+  // Provenance of the decision, never inferred at read time.
+  originatingContext String
+
+  // Stays NULL while no passenger cashier exists (spec s.18 exclusion).
+  // Explicitly nullable rather than defaulted to a placeholder: a fabricated
+  // processor would be a false record of who took the money.
+  financialProcessor String?
+
+  // The whole point of this model. Built from conversationId + a stable
+  // per-event key, so replaying the same inbound message cannot charge twice.
+  idempotencyKey String @unique
+
+  createdAt DateTime @default(now())
+
+  @@index([customerRef])
+  @@index([createdAt])
 }
 
 model AuditLogEntry {
@@ -2546,27 +2604,27 @@ enum DeliveryCrmEventType {
 // prospectRef + createdAt), do-not-contact (doNotContact flag persists once
 // set), and source traceability (sourceType/sourceRef always recorded).
 model AcquisitionOutreachEvent {
-  id              String                  @id @default(cuid())
-  contractorAgent AgentName
-  prospectType    AcquisitionProspectType
+  id                 String                  @id @default(cuid())
+  contractorAgent    AgentName
+  prospectType       AcquisitionProspectType
   // Loose correlation id (ScoutCandidate.id / PassengerProspect.id /
   // BusinessProspect.id) — deliberately not a Prisma relation so this shared
   // log never becomes a write path onto any prospect model directly.
-  prospectRef     String
-  channel         Channel
-  sourceType      AcquisitionSourceType
-  sourceRef       String? // e.g. TelegramGroup id or free-text source label
-  status          OutreachStatus
-  messageSummary  String // never the full message body verbatim — audit-safe summary only
-  doNotContact    Boolean                 @default(false)
+  prospectRef        String
+  channel            Channel
+  sourceType         AcquisitionSourceType
+  sourceRef          String? // e.g. TelegramGroup id or free-text source label
+  status             OutreachStatus
+  messageSummary     String // never the full message body verbatim — audit-safe summary only
+  doNotContact       Boolean                 @default(false)
   // Normalized cross-type identity signal (phone/handle — see
   // src/lib/prospecting/identity.ts) so an opt-out recorded by one
   // acquisition contractor blocks every other contractor from reaching the
   // same real person under a different prospectType/prospectRef. Optional:
   // absent for any caller that hasn't supplied one, never backfilled.
   contactFingerprint String?
-  idempotencyKey  String                  @unique
-  createdAt       DateTime                @default(now())
+  idempotencyKey     String                  @unique
+  createdAt          DateTime                @default(now())
 
   @@index([prospectType, prospectRef, createdAt])
   @@index([contractorAgent, createdAt])
@@ -2650,7 +2708,7 @@ model DeliveryCrmEvent {
 // delivery-executor prospect is a DIFFERENT commercial capability even when
 // the same human could plausibly do both.
 model DeliveryExecutorProspect {
-  id                  String                          @id @default(cuid())
+  id                  String                         @id @default(cuid())
   sourceType          AcquisitionSourceType
   sourceGroupId       String?
   sourceRef           String?
@@ -2662,35 +2720,35 @@ model DeliveryExecutorProspect {
   normalizedPhone     String?
   status              DeliveryExecutorProspectStatus @default(NEW)
   handedOffAt         DateTime?
-  createdAt           DateTime                        @default(now())
-  updatedAt           DateTime                        @updatedAt
+  createdAt           DateTime                       @default(now())
+  updatedAt           DateTime                       @updatedAt
 
   // Additive granular pipeline (spec s.12) — see ProspectLifecycleStage.
-  lifecycleStage      ProspectLifecycleStage         @default(DISCOVERED)
+  lifecycleStage        ProspectLifecycleStage     @default(DISCOVERED)
   // Structured qualification capture (spec s.12.A). Every field stays null
   // until a real, evidenced fact is available — "unknown facts remain
   // unknown," never inferred. First-write-wins in code (prospect.ts) so a
   // later call can never silently overwrite already-captured evidence.
-  executorType        String? // individual courier / taxi driver / local delivery driver / motorcycle-scooter courier / van driver / pickup owner / courier service / regional operator
-  personOrCompanyName String?
-  serviceAreaText     String? // cities/regions covered
-  maxLoadText         String?
-  dimensionsText      String?
-  localOrIntercityText String?
-  availabilityText    String?
-  contactChannelsText String?
-  confidence          Float?
-  verificationStatus  ProspectVerificationStatus      @default(UNVERIFIED)
-  evidenceNotes       String?
-  rejectionReason     String?
+  executorType          String? // individual courier / taxi driver / local delivery driver / motorcycle-scooter courier / van driver / pickup owner / courier service / regional operator
+  personOrCompanyName   String?
+  serviceAreaText       String? // cities/regions covered
+  maxLoadText           String?
+  dimensionsText        String?
+  localOrIntercityText  String?
+  availabilityText      String?
+  contactChannelsText   String?
+  confidence            Float?
+  verificationStatus    ProspectVerificationStatus @default(UNVERIFIED)
+  evidenceNotes         String?
+  rejectionReason       String?
   // Loose correlation id into another DeliveryExecutorProspect this one may
   // be the same real person/entity as — set only on a deterministic-but-weak
   // signal (never a name-similarity guess), never merged automatically (spec
   // s.12.E: "when uncertain, keep separate and flag").
   possibleDuplicateOfId String?
-  followUpCount       Int                             @default(0)
-  lastFollowUpAt      DateTime?
-  respondedAt         DateTime?
+  followUpCount         Int                        @default(0)
+  lastFollowUpAt        DateTime?
+  respondedAt           DateTime?
 
   @@index([status, createdAt])
   @@index([normalizedPhone])
@@ -2702,7 +2760,7 @@ model DeliveryExecutorProspect {
 // promoted automatically into Partner Registry's TransportAsset facts,
 // which require normal onboarding/verification (docs/architecture/partner-registry.md).
 model CargoCarrierProspect {
-  id                       String                      @id @default(cuid())
+  id                       String                     @id @default(cuid())
   sourceType               AcquisitionSourceType
   sourceGroupId            String?
   sourceRef                String?
@@ -2717,35 +2775,35 @@ model CargoCarrierProspect {
   normalizedPhone          String?
   status                   CargoCarrierProspectStatus @default(NEW)
   handedOffAt              DateTime?
-  createdAt                DateTime                    @default(now())
-  updatedAt                DateTime                    @updatedAt
+  createdAt                DateTime                   @default(now())
+  updatedAt                DateTime                   @updatedAt
 
   // Additive granular pipeline (spec s.12) — see ProspectLifecycleStage.
-  lifecycleStage           ProspectLifecycleStage      @default(DISCOVERED)
+  lifecycleStage                  ProspectLifecycleStage     @default(DISCOVERED)
   // Structured qualification capture (spec s.12.B). Every field stays null
   // until a real, evidenced fact is available — never inferred (capacity,
   // route, licensing, refrigeration, availability). First-write-wins in code
   // (prospect.ts) so a later call can never silently overwrite already-
   // captured evidence.
-  carrierIdentityName      String?
-  fleetTypeText            String? // cargo van / truck / refrigerated / box truck / flatbed / intercity freight / regional operator / logistics company / freight forwarder
-  cargoBodyTypeText        String?
-  geographicCoverageText   String?
+  carrierIdentityName             String?
+  fleetTypeText                   String? // cargo van / truck / refrigerated / box truck / flatbed / intercity freight / regional operator / logistics company / freight forwarder
+  cargoBodyTypeText               String?
+  geographicCoverageText          String?
   localIntercityInternationalText String?
-  recurringRoutesNote      String? // distinct from the free-text claim already on rawRouteText — set only once a recurring route is *confirmed*, not merely mentioned
-  schedulingText           String?
-  confidence               Float?
-  verificationStatus       ProspectVerificationStatus  @default(UNVERIFIED)
-  evidenceNotes            String?
-  rejectionReason          String?
+  recurringRoutesNote             String? // distinct from the free-text claim already on rawRouteText — set only once a recurring route is *confirmed*, not merely mentioned
+  schedulingText                  String?
+  confidence                      Float?
+  verificationStatus              ProspectVerificationStatus @default(UNVERIFIED)
+  evidenceNotes                   String?
+  rejectionReason                 String?
   // Loose correlation id into another CargoCarrierProspect this one may be
   // the same real person/entity as — set only on a deterministic-but-weak
   // signal (never a name-similarity guess), never merged automatically (spec
   // s.12.E: "when uncertain, keep separate and flag").
-  possibleDuplicateOfId    String?
-  followUpCount            Int                         @default(0)
-  lastFollowUpAt           DateTime?
-  respondedAt              DateTime?
+  possibleDuplicateOfId           String?
+  followUpCount                   Int                        @default(0)
+  lastFollowUpAt                  DateTime?
+  respondedAt                     DateTime?
 
   @@index([status, createdAt])
   @@index([normalizedPhone])

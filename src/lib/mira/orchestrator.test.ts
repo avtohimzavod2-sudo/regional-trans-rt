@@ -17,8 +17,16 @@ import type { SaparResult } from "@/lib/sapar/types";
 
 const dbMocks = {
   miraProviderCall: { create: vi.fn().mockResolvedValue({}) },
-  auditLogEntry: { findFirst: vi.fn().mockResolvedValue(null) },
+  auditLogEntry: { create: vi.fn().mockResolvedValue({}) },
   match: { update: vi.fn().mockResolvedValue({}) },
+  // The passenger fee path writes here and deduplicates on the unique
+  // idempotencyKey (cold audit B4). create() is the observable signal that a
+  // charge was recorded; there is deliberately no findFirst, because a
+  // read-then-write dedupe is the bug that finding was about.
+  passengerFinancialIntent: {
+    create: vi.fn().mockResolvedValue({}),
+    findUnique: vi.fn().mockResolvedValue(null),
+  },
 };
 vi.mock("@/lib/db", () => ({ db: dbMocks }));
 
@@ -133,7 +141,8 @@ beforeEach(() => {
   providerUnderstandMock.mockResolvedValue(PASSIVE_UNDERSTANDING);
   providerReplyMock.mockResolvedValue({ text: "" });
   dbMocks.miraProviderCall.create.mockResolvedValue({});
-  dbMocks.auditLogEntry.findFirst.mockResolvedValue(null);
+  dbMocks.passengerFinancialIntent.create.mockResolvedValue({});
+  dbMocks.passengerFinancialIntent.findUnique.mockResolvedValue(null);
   dbMocks.match.update.mockResolvedValue({});
   handlePassengerResponseMock.mockResolvedValue({ id: "match_1", status: "DECLINED_BY_PASSENGER" });
 });
@@ -667,7 +676,19 @@ describe("handleMiraInbound — baggage-policy + passenger-finance gate (Mira Pa
 
     const result = await handleMiraInbound({ ...BASE_PARAMS, text: "Нужна поездка Бишкек-Ош, у меня чемодан 90 кг" });
 
-    expect(dbMocks.auditLogEntry.findFirst).toHaveBeenCalledTimes(1);
+    expect(dbMocks.passengerFinancialIntent.create).toHaveBeenCalledTimes(1);
+    expect(dbMocks.passengerFinancialIntent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        paymentType: "PASSENGER_EXTRA_BAGGAGE_FEE",
+        reason: "SIGNIFICANT_EXCESS_BAGGAGE",
+        amountSom: 100,
+        currency: "KGS",
+        conversationId: "conv_1",
+        customerRef: BASE_PARAMS.senderId,
+        financialProcessor: null,
+        idempotencyKey: expect.stringContaining("MIRA_PASSENGER_FINANCIAL_INTENT:conv_1:"),
+      }),
+    });
     expect(logAgentActionMock).toHaveBeenCalledWith(
       expect.objectContaining({ action: "MIRA_PASSENGER_FINANCIAL_INTENT_RECORDED" }),
     );
@@ -686,7 +707,7 @@ describe("handleMiraInbound — baggage-policy + passenger-finance gate (Mira Pa
 
     const result = await handleMiraInbound({ ...BASE_PARAMS, text: "Нужна поездка Бишкек-Ош, у меня чемодан 20 кг" });
 
-    expect(dbMocks.auditLogEntry.findFirst).not.toHaveBeenCalled();
+    expect(dbMocks.passengerFinancialIntent.create).not.toHaveBeenCalled();
     expect(logAgentActionMock).not.toHaveBeenCalledWith(
       expect.objectContaining({ action: "MIRA_PASSENGER_FINANCIAL_INTENT_RECORDED" }),
     );
@@ -704,7 +725,7 @@ describe("handleMiraInbound — baggage-policy + passenger-finance gate (Mira Pa
     await handleMiraInbound({ ...BASE_PARAMS, text: "У меня 90 кг товара для магазина, могу доставить сам" });
 
     expect(handleSaparInboundMock).not.toHaveBeenCalled();
-    expect(dbMocks.auditLogEntry.findFirst).not.toHaveBeenCalled();
+    expect(dbMocks.passengerFinancialIntent.create).not.toHaveBeenCalled();
     expect(logAgentActionMock).not.toHaveBeenCalledWith(
       expect.objectContaining({ action: "MIRA_PASSENGER_FINANCIAL_INTENT_RECORDED" }),
     );
