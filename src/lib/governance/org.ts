@@ -141,7 +141,7 @@ export const RT_ORG_NODES: RtOrgNode[] = [
     status: "PLANNED",
     reportsTo: "ARTUR",
     notes:
-      "s.8. Referenced across the codebase (prospecting handoff targets, Adilet manager-view, Artur snapshot) but no module exists. Owns passenger-operations PERFORMANCE, never individual bookings.",
+      "s.8. Owns passenger-operations PERFORMANCE, never individual bookings. The management-information layer now exists in code (AKZHOL_REPORTING), but this node stays PLANNED because the POST is vacant: nobody holds the akzhol role, so nothing reports to it and it can accept no escalation. A vacancy is a staffing blocker, not missing code — see docs/RT_PRE_LIVE_BLOCKERS.md.",
   },
   {
     id: "ZHOLAMAN",
@@ -150,7 +150,7 @@ export const RT_ORG_NODES: RtOrgNode[] = [
     status: "PLANNED",
     reportsTo: "ARTUR",
     notes:
-      "s.9. Only src/lib/sapargul/zholaman.ts exists — a payment-visibility filter, not a manager module. Owns delivery/cargo PERFORMANCE, never shipment execution or money confirmation.",
+      "s.9. Owns delivery/cargo PERFORMANCE, never shipment execution or money confirmation. Same distinction as AKZHOL: the reporting layer exists (ZHOLAMAN_REPORTING), the accountable post does not.",
   },
 
   // ---- Independent control ----------------------------------------------
@@ -367,6 +367,30 @@ export const RT_ORG_NODES: RtOrgNode[] = [
     status: "IMPLEMENTED",
     reportsTo: "ARTUR",
     notes: "Must never become a second Market Gap truth (s.3.D).",
+  },
+  // These two are the instrumentation of the manager posts above, recorded
+  // separately from the posts themselves. Conflating them is exactly the
+  // management theater s.2 forbids: a report that measures the passenger
+  // direction is not a manager who answers for it. Classified
+  // READ_ONLY_ANALYTICS because that is what the code does — no writes at all,
+  // enforced by src/lib/management/boundary.test.ts.
+  {
+    id: "AKZHOL_REPORTING",
+    displayName: "Akzhol passenger-direction report (read-only)",
+    classification: "READ_ONLY_ANALYTICS",
+    status: "IMPLEMENTED",
+    reportsTo: "ARTUR",
+    plannedReportsTo: "AKZHOL",
+    notes: "src/lib/akzhol/*: aggregates leads, bookings, declines, directions, handling time, execution and anomalies. No money field is queried; not in AGENT_REGISTRY, because it claims no exclusive capability and is not an actor.",
+  },
+  {
+    id: "ZHOLAMAN_REPORTING",
+    displayName: "Zholaman cargo-direction report (read-only)",
+    classification: "READ_ONLY_ANALYTICS",
+    status: "IMPLEMENTED",
+    reportsTo: "ARTUR",
+    plannedReportsTo: "ZHOLAMAN",
+    notes: "src/lib/zholaman/*: aggregates orders, execution, partners, incidents, quality and volume dynamics. Its only payment view is paymentStatusForJolaman's coarse collapse (s.21) — no amounts.",
   },
 
   // ---- Acquisition (contractors) ----------------------------------------

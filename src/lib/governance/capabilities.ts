@@ -734,24 +734,29 @@ export const RT_ACCOUNTABILITY_MATRIX: RtCapability[] = [
     domain: "MANAGEMENT",
     type: "OBSERVATION",
     accountableOwner: "AKZHOL",
-    executor: "AKZHOL",
+    // The post is accountable; the read-only module does the measuring. Kept
+    // as two nodes so "the numbers exist" is never read as "someone answers
+    // for them".
+    executor: "AKZHOL_REPORTING",
     systemOfRecord: "Manager report (derived from RT Core)",
     escalationTarget: "ARTUR",
     humanApprovalRequired: false,
     preLiveRequired: false,
-    failureMode: "ORPHAN TODAY: no manager module; Artur reads raw tables instead (s.8).",
+    failureMode:
+      "PARTIAL: the measurement exists (src/lib/akzhol/*, read-only, role-gated), the accountable post does not. Until someone holds the akzhol role, nobody answers for what the report shows — so this stays owned by a PLANNED node on purpose (s.8).",
   },
   {
     capability: "delivery_cargo_performance_management",
     domain: "MANAGEMENT",
     type: "OBSERVATION",
     accountableOwner: "ZHOLAMAN",
-    executor: "ZHOLAMAN",
+    executor: "ZHOLAMAN_REPORTING",
     systemOfRecord: "Manager report (derived from RT Core)",
     escalationTarget: "ARTUR",
     humanApprovalRequired: false,
     preLiveRequired: false,
-    failureMode: "ORPHAN TODAY: only a payment-visibility filter exists (s.9).",
+    failureMode:
+      "PARTIAL: src/lib/zholaman/* now reports orders, execution, partners, incidents and quality read-only, on top of the existing s.21 payment filter. The accountable post is still vacant, and no customer-review model exists at all — the report says so rather than scoring satisfaction (s.9).",
   },
   {
     capability: "executive_reporting",

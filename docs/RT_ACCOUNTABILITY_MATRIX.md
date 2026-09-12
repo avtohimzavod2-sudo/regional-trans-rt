@@ -210,15 +210,15 @@ Capabilities: **51** · Pre-LIVE required: **33** · Structural violations: **0*
 
 | Capability | Type | Accountable owner | Executor | Reviewer | Human approver | System of record | Escalates to | Pre-LIVE |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `passenger_operations_performance_management` | OBSERVATION | AKZHOL *(planned)* | AKZHOL | — | — | Manager report (derived from RT Core) | ARTUR | no |
-| `delivery_cargo_performance_management` | OBSERVATION | ZHOLAMAN *(planned)* | ZHOLAMAN | — | — | Manager report (derived from RT Core) | ARTUR | no |
+| `passenger_operations_performance_management` | OBSERVATION | AKZHOL *(planned)* | AKZHOL_REPORTING | — | — | Manager report (derived from RT Core) | ARTUR | no |
+| `delivery_cargo_performance_management` | OBSERVATION | ZHOLAMAN *(planned)* | ZHOLAMAN_REPORTING | — | — | Manager report (derived from RT Core) | ARTUR | no |
 | `executive_reporting` | OBSERVATION | ARTUR | ARTUR | — | — | DailyBrief / WeeklyReport | FOUNDER | no |
 | `launch_readiness_decision` | DECISION | FOUNDER | FOUNDER | ARTUR | FOUNDER | RT_PRE_LIVE_READINESS | FOUNDER | yes |
 
 <details><summary>Failure modes</summary>
 
-- `passenger_operations_performance_management` — ORPHAN TODAY: no manager module; Artur reads raw tables instead (s.8).
-- `delivery_cargo_performance_management` — ORPHAN TODAY: only a payment-visibility filter exists (s.9).
+- `passenger_operations_performance_management` — PARTIAL: the measurement exists (src/lib/akzhol/*, read-only, role-gated), the accountable post does not. Until someone holds the akzhol role, nobody answers for what the report shows — so this stays owned by a PLANNED node on purpose (s.8).
+- `delivery_cargo_performance_management` — PARTIAL: src/lib/zholaman/* now reports orders, execution, partners, incidents and quality read-only, on top of the existing s.21 payment filter. The accountable post is still vacant, and no customer-review model exists at all — the report says so rather than scoring satisfaction (s.9).
 - `executive_reporting` — Report generation failure must never block operations (s.20).
 - `launch_readiness_decision` — Fails closed: unknown readiness is never LIVE_READY (s.29).
 
@@ -410,6 +410,8 @@ Classifications describe what each node **actually is in code**, not what its na
 | RISK_ENGINE — Fraud / risk signal engine | DETERMINISTIC_SERVICE | PLANNED | ADILET | — | no |
 | SCOUT — Scout — driver discovery & fingerprinting | BACKGROUND_INTELLIGENCE | IMPLEMENTED | ARTUR | AKZHOL | no |
 | ANALYTICS — Analytics — read-only aggregation | READ_ONLY_ANALYTICS | IMPLEMENTED | ARTUR | — | no |
+| AKZHOL_REPORTING — Akzhol passenger-direction report (read-only) | READ_ONLY_ANALYTICS | IMPLEMENTED | ARTUR | AKZHOL | no |
+| ZHOLAMAN_REPORTING — Zholaman cargo-direction report (read-only) | READ_ONLY_ANALYTICS | IMPLEMENTED | ARTUR | ZHOLAMAN | no |
 | DRIVER_CONTRACTOR — Driver acquisition contractor | OPERATIONAL_AGENT | IMPLEMENTED | ARTUR | AKZHOL | no |
 | PASSENGER_CONTRACTOR — Passenger acquisition contractor | OPERATIONAL_AGENT | IMPLEMENTED | ARTUR | AKZHOL | no |
 | DELIVERY_CONTRACTOR — Business customer acquisition contractor | OPERATIONAL_AGENT | IMPLEMENTED | ARTUR | ZHOLAMAN | no |
@@ -421,7 +423,7 @@ Classifications describe what each node **actually is in code**, not what its na
 
 ### Manager layer gap
 
-20 nodes are intended to sit under a manager that does not exist yet. They report to a real manager in the meantime rather than being drawn under an empty box:
+22 nodes are intended to sit under a manager that does not exist yet. They report to a real manager in the meantime rather than being drawn under an empty box:
 
 - **MIRA** — reports to ARTUR today, AKZHOL once built.
 - **JOLCHU** — reports to ARTUR today, AKZHOL once built.
@@ -435,6 +437,8 @@ Classifications describe what each node **actually is in code**, not what its na
 - **CRM_AUTO** — reports to ARTUR today, AKZHOL once built.
 - **SIDE_EFFECT_GATEWAY** — reports to FOUNDER today, HUMAN_RELIABILITY_OWNER once built.
 - **SCOUT** — reports to ARTUR today, AKZHOL once built.
+- **AKZHOL_REPORTING** — reports to ARTUR today, AKZHOL once built.
+- **ZHOLAMAN_REPORTING** — reports to ARTUR today, ZHOLAMAN once built.
 - **DRIVER_CONTRACTOR** — reports to ARTUR today, AKZHOL once built.
 - **PASSENGER_CONTRACTOR** — reports to ARTUR today, AKZHOL once built.
 - **DELIVERY_CONTRACTOR** — reports to ARTUR today, ZHOLAMAN once built.
